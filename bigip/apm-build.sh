@@ -248,6 +248,12 @@ add "$B/mgmt/tm/ltm/virtual" "$(jq -n --arg n "${P}-vs" --arg d "/$PART/${VIP_IP
   '{name:$n,partition:"Common",destination:$d,mask:"255.255.255.255",ipProtocol:"tcp",
     profiles:[{name:"/Common/tcp"},{name:"/Common/http"},{name:$cs,context:"clientside"},{name:"/Common/serverssl",context:"serverside"},{name:$ap},{name:$cp},{name:"/Common/rewrite-portal"},{name:"/Common/rba"},{name:"/Common/ppp"},{name:"/Common/websso"}],
     rules:[$rs],sourceAddressTranslation:{type:"automap"}}')"
+# Pin the traffic group EXPLICITLY. A virtual-address in an HA pair already defaults to
+# traffic-group-1, so the webtop would float anyway — but "it happens to inherit the right
+# default" is not the same claim as "the demo configures the access tier to survive a
+# failover", and only the second one is worth making. Set on the virtual-address, not the
+# virtual server: the address is what carries a traffic group.
+bash_cmd "tmsh modify ltm virtual-address ${VIP_IP} traffic-group ${WL_APM_TRAFFIC_GROUP:-traffic-group-1}"
 bash_cmd "tmsh save sys config"
 
 echo; echo "Done. Browse https://${WL_WEBTOP_FQDN}/ — logon page, then Keycloak for TOTP, then the webtop."

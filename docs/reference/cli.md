@@ -188,7 +188,7 @@ scripts/validate.sh
 BIGIP_PASS='<bigip-admin-pw>' scripts/validate.sh   # injected rather than from .env
 ```
 
-Takes no arguments. Six sections: containers running; the two demo DNS records answering
+Takes no arguments. Seven sections: containers running; the two demo DNS records answering
 from CoreDNS; the directory (bind account, both demo users, and that `alice.admin` is in the
 admin group while `bob.user` is not); Keycloak's realm discovery and issuer; the BIG-IP
 access tier on both units; the resulting role for each demo user; and the VIP answering on
@@ -255,9 +255,9 @@ BIGIP_MGMT=<bigip-b-mgmt-ip> bigip/system-auth.sh
 
 Takes no arguments; the unit is selected by `BIGIP_MGMT`, which the script requires and does
 not default. `deploy.sh --bigip` sets it per unit and calls this twice. Running it against
-only one unit is the classic "works until failover, then everyone is read-only" bug: `auth
-ldap` and `auth remote-role` live in the device-local configuration and a config-sync does
-not carry them.
+only one unit is the classic "works until failover" bug: `auth ldap system-auth` and `auth
+source` live in the device-local configuration and a config-sync does not carry them.
+(`auth remote-role` does sync, but it cannot authenticate anyone on its own.)
 
 Five steps: upload the directory CA and create-or-**update** the `ssl-cert` object (an
 existing object still holds the old CA, and stale trust fails closed); write the LDAPS
@@ -332,3 +332,6 @@ that `.env` has already set.
 ## Related
 - [configuration.md](configuration.md) — every variable these scripts read.
 - [api.md](api.md) — the endpoints they call.
+- [../deploy.md](../deploy.md) — the order to run them in, and what to check between steps.
+- [../operations/troubleshooting.md](../operations/troubleshooting.md) — what to do when one
+  of them fails.

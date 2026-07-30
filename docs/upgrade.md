@@ -14,7 +14,7 @@ _Last validated: 2026-07-30_
 | The currently pinned container images | Newer images | Edit the tags in `docker-compose.yml`, then `./deploy.sh --stack` |
 | A `.env` you have edited | The change applied | `./deploy.sh` — leaf certificates are reissued and the BIG-IP objects converge |
 | The current demo CA | A fresh CA | `WL_REGEN_CA=1 ./deploy.sh --stack`, then `./deploy.sh --bigip` — [operations/runbooks/rotate-ca.md](operations/runbooks/rotate-ca.md) |
-| Bundled OpenLDAP | Your own AD / FreeIPA / LDAP | Set `WL_DIRECTORY_MODE=external` and the `WL_LDAP_*` block, then re-deploy — [directory.md](directory.md) |
+| Bundled OpenLDAP | Your own AD / FreeIPA / LDAP | Set `WL_DIRECTORY_MODE=external` and the `WL_LDAP_*` block, run `scripts/preflight-directory.sh`, then re-deploy — [directory.md](directory.md) |
 
 Downgrading is the same operation against an older revision or an older image tag, with the
 rollback caveat below.
@@ -65,7 +65,7 @@ to be re-imported into an empty store — which means dropping `kcdata` and re-e
 user, so treat it as a rebuild rather than an upgrade:
 
 ```bash
-docker compose --profile bundled down -v && ./deploy.sh --stack
+./teardown.sh --stack --volumes && ./deploy.sh --stack
 ```
 
 A Keycloak upgrade does not touch the BIG-IP as long as the issuer string is unchanged. APM
@@ -140,41 +140,41 @@ enrolled TOTP secrets are lost:
 git checkout <previous-revision> -- docker-compose.yml
 ./deploy.sh --stack
 docker compose logs --tail 50 keycloak     # if it will not start on the older image:
-docker compose --profile bundled down -v && ./deploy.sh --stack
+./teardown.sh --stack --volumes && ./deploy.sh --stack
 ```
 
 To back the appliances out rather than roll them back, see
 [deploy.md](deploy.md#rollback) — restore `auth source type local` first, then delete objects.
 
 ## Teardown
-Remove the stack, its volumes and the generated material:
+`./teardown.sh` mirrors `deploy.sh` and takes the same two halves:
 
 ```bash
-docker compose --profile bundled down -v            # containers, network and all three volumes
+./teardown.sh --bigip              # restore local auth on both units, delete the access tier
+./teardown.sh --stack              # stop the containers; volumes and enrolments survive
+./teardown.sh --all --volumes      # both halves, and drop the volumes
+```
+
+The BIG-IP half runs first when both are selected, and within it the auth source returns to
+`local` on **both** units before any object is deleted, so remote authentication is never left
+pointing at a half-removed configuration. What it leaves alone by design: the trust anchors, the
+uploaded certificates and the demo CA (inert on their own, and not worth disturbing on a shared
+lab appliance); the BIG-IPs' local accounts, licence and provisioning; and **an external
+directory** — warden-lite creates nothing in yours, binds read-only, and never writes, so there
+is nothing of its making to delete there ([directory.md](directory.md)). The per-object detail
+is in [deploy.md](deploy.md#rollback).
+
+`--volumes` drops `kcdata`, and with it **every enrolled TOTP secret**, along with the cached
+`certs/.totp-*` files. That is the intended behaviour for a demo you rebuild, but it is not
+recoverable — to reset a single user instead, use
+[operations/runbooks/reset-user-mfa.md](operations/runbooks/reset-user-mfa.md).
+
+To remove the generated material as well, which discards the CA:
+
+```bash
 sudo chown -R "$(id -u):$(id -g)" certs             # openldap chowns this dir at startup
 rm -rf certs keycloak/import dns/Corefile
 ```
-
-`-v` destroys `kcdata`, and with it **every enrolled TOTP secret**. That is the intended
-behaviour for a demo you rebuild, but it is not recoverable — to reset a single user instead,
-use [operations/runbooks/reset-user-mfa.md](operations/runbooks/reset-user-mfa.md).
-
-Then back the BIG-IPs out, in this order — auth source first, so remote authentication is never
-left pointing at a half-removed configuration:
-
-```bash
-for u in "${BIGIP_A_MGMT}" "${BIGIP_B_MGMT}"; do
-  curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" -X PATCH -H 'Content-Type: application/json' \
-    -d '{"type":"local"}' "https://${u}/mgmt/tm/auth/source" | jq -r .type
-done
-```
-
-Then delete the APM objects listed in `bigip/lib/objects.sh` and config-sync, exactly as in
-[deploy.md](deploy.md#rollback).
-
-What teardown deliberately leaves alone: the BIG-IPs' local accounts, licence and provisioning;
-and **an external directory** — warden-lite creates nothing in yours, binds read-only, and never
-writes, so there is nothing of its making to delete there ([directory.md](directory.md)).
 
 ### Verification
 ```bash

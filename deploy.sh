@@ -4,7 +4,7 @@
 #   ./deploy.sh --stack    Keycloak + the directory, in Docker. Touches NO BIG-IP. Prove
 #                          this half works before pointing anything at your appliances.
 #   ./deploy.sh --bigip    the BIG-IP half: trust anchors, remote-role on both units, and
-#                          the APM access policy on the active unit (config-sync carries it
+#                          the APM access policy on unit A (config-sync carries it
 #                          to the peer).
 #   ./deploy.sh            both, in that order.
 #
@@ -68,6 +68,22 @@ if [ "$DO_STACK" = 1 ]; then
     docker compose up -d
   fi
 
+  # `up -d` will not recreate a service whose definition has not changed, and Keycloak and
+  # OpenLDAP read their certificate files once at process start. So when gen-certs.sh has
+  # actually re-issued a leaf certificate, the running containers are still serving the old
+  # one and must be restarted explicitly — otherwise the CA on disk and the certificate on
+  # the wire disagree, and the BIG-IP's back-channel validation fails for reasons nothing
+  # in the logs connects to a certificate.
+  if [ -f certs/.reissued ]; then
+    say "certificates were re-issued — restarting the services that present them"
+    if wl_is_bundled; then
+      docker compose --profile bundled restart keycloak openldap
+    else
+      docker compose restart keycloak
+    fi
+    rm -f certs/.reissued
+  fi
+
   if wl_is_bundled; then
     say "seeding the directory"
     # The overlay MUST land before the group: memberOf is only computed for changes made
@@ -118,15 +134,15 @@ if [ "$DO_BIGIP" = 1 ]; then
   : "${BIGIP_A_MGMT:?set BIGIP_A_MGMT}"; : "${BIGIP_B_MGMT:?set BIGIP_B_MGMT}"
 
   say "system auth + remote-role on BOTH units"
-  # Per-unit and not synced: auth ldap/remote-role live in the device-local config, so a
-  # config-sync will NOT carry them to the peer. Failing to do this on B is the classic
-  # "works until failover, then everyone is read-only" bug.
+  # Per-unit: `auth ldap system-auth` and `auth source` are device-local and a config-sync
+  # does NOT carry them to the peer. (`auth remote-role` does sync, but on its own it cannot
+  # authenticate anyone.) Skipping B is the classic "works until failover" bug.
   for unit in "$BIGIP_A_MGMT" "$BIGIP_B_MGMT"; do
     echo "  --- $unit ---"
     BIGIP_MGMT="$unit" bigip/system-auth.sh
   done
 
-  say "APM access policy on the active unit ($BIGIP_A_MGMT)"
+  say "APM access policy on unit A ($BIGIP_A_MGMT)"
   BIGIP_MGMT="$BIGIP_A_MGMT" bigip/apm-build.sh
 
   say "config-sync to the peer"

@@ -8,9 +8,9 @@ _Last validated: 2026-07-30_
 
 ## When to use this
 - After any `./deploy.sh --bigip`, and after any change to system authentication on **either**
-  unit. `auth ldap`, `remote-role` and `auth source` are device-local and are not carried by
-  config-sync, so a change applied to one unit leaves the pair asymmetric with no error
-  anywhere.
+  unit. `auth ldap system-auth` and `auth source` are device-local and are not carried by
+  config-sync (`auth remote-role` is synced, but is inert without them), so a change applied
+  to one unit leaves the pair asymmetric with no error anywhere.
 - Before demoing to anyone, because this is the check that catches the classic mistake: the
   build was run against A only, everything passes, and at the first failover every remote user
   silently lands on the default read-only role.
@@ -50,12 +50,19 @@ be green first. This runbook is the expensive version: it proves the *data plane
    of this runbook proves nothing:
 
    ```bash
-   tmsh list ltm virtual-address "${WL_APM_VIP}" traffic-group
+   # on unit A, from tmsh — <apm-vip> is WL_APM_VIP
+   tmsh list ltm virtual-address <apm-vip> traffic-group
    ```
 
-   Expected: a floating group such as `traffic-group-1`, matching `WL_APM_TRAFFIC_GROUP`. If it
-   reports `traffic-group-local-only`, move it (`tmsh modify ltm virtual-address <vip>
-   traffic-group traffic-group-1`) and sync before continuing.
+   Expected: a floating group such as `traffic-group-1`, matching `WL_APM_TRAFFIC_GROUP`. No
+   script in the repo reads that variable — `bigip/apm-build.sh` creates the webtop virtual
+   server without an explicit traffic group, so the VIP inherits the device default. If this
+   reports `traffic-group-local-only`, set it and sync before continuing:
+
+   ```bash
+   tmsh modify ltm virtual-address <apm-vip> traffic-group traffic-group-1
+   tmsh run cm config-sync to-group <device-group>
+   ```
 
 3. Establish a working baseline through the current active unit:
 

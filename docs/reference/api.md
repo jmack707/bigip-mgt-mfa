@@ -158,3 +158,6 @@ itself.
 ## Related
 - [configuration.md](configuration.md) — the variables every address and name above is built from.
 - [cli.md](cli.md) — the scripts that make these calls.
+- [../architecture.md](../architecture.md) — how the three interfaces fit together.
+- [../operations/troubleshooting.md](../operations/troubleshooting.md) — symptom-first
+  triage for the failures tabulated above.

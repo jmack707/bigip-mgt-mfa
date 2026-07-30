@@ -98,9 +98,11 @@ same log will show the users authenticating perfectly well. Space the requests o
 The demo works, the active unit fails over, and now every user is read-only on the new active
 unit.
 
-`auth ldap` and `auth remote-role` are device-local: config-sync does **not** carry them to
-the peer. Only the APM policy syncs. Both units must be configured explicitly, which is why
-`deploy.sh --bigip` loops over `BIGIP_A_MGMT` and `BIGIP_B_MGMT`. Verify on each unit:
+`auth ldap system-auth` and `auth source` are device-local: config-sync does **not** carry
+them to the peer. (`auth remote-role` *is* synced — but a role rule cannot authenticate
+anyone on a unit that has no LDAP server configured, so the symptom is the same.) Both units
+must be configured explicitly, which is why `deploy.sh --bigip` loops over `BIGIP_A_MGMT` and
+`BIGIP_B_MGMT`. Verify on each unit:
 
 ```bash
 tmsh list auth remote-role role-info warden_lite_admins
