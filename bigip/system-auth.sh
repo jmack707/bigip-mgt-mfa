@@ -7,9 +7,12 @@
 # That is what keeps the story honest: the access tier can be bypassed and the answer is
 # still the same. See docs/adr/0003-authorization-on-remote-role.md.
 #
-# NOT SYNCED: auth ldap and remote-role live in the device-local config, so a config-sync
-# does NOT carry them to the peer. Both units must be configured, or the demo works until
-# the first failover and then everyone lands read-only.
+# RUN ON BOTH UNITS. `auth ldap system-auth` and `auth source` are device-local: a
+# config-sync does NOT carry them to the peer. (`auth remote-role` DOES sync — verified by
+# creating one on A alone and watching it appear on B — but a synced rule is useless on a
+# unit that has no LDAP server configured and is still authenticating locally.) Configure
+# only the active unit and the demo works until the first failover, then every login fails
+# on the new active unit.
 #
 # SAFETY: admin/root remain LOCAL accounts on TMOS. Switching the auth source to ldap
 # cannot lock you out of the box.

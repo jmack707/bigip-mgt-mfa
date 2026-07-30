@@ -23,7 +23,8 @@ attribution", and pays almost nothing.
 | Keycloak 26 | Docker | The second factor only. Federates the directory read-only; never a password store |
 | OpenLDAP | Docker, `bundled` profile | Demo directory and the two demo principals. Absent in external mode |
 | CoreDNS | Docker | Authoritative for the demo zone; forwards everything else |
-| `auth ldap system-auth` + `remote-role` | Each BIG-IP, device-local | Authenticates the SSO'd credential and decides Administrator vs Guest |
+| `auth ldap system-auth` + `auth source` | Each BIG-IP, device-local (not synced) | Authenticates the SSO'd credential against the directory |
+| `auth remote-role` | Built on A, config-synced to B | Decides Administrator vs Guest from group membership |
 | Shadow façade virtuals | BIG-IP | Non-routable stand-ins that let portal access reach each unit's TMUI |
 
 ## Data flow
@@ -82,9 +83,11 @@ and nothing to rotate.
   addresses are rejected outright, and publishing TMUI on a routable self-IP would be a hole
   regardless. Each unit's TMUI is fronted by an RFC 5737 façade address instead, steered to
   the real last hop by an iRule.
-- **Some BIG-IP configuration is device-local.** `auth ldap` and `remote-role` are not
-  carried by config-sync, so both units are configured explicitly. Skipping the peer produces
-  a demo that works until the first failover and then quietly makes everyone read-only.
+- **Some BIG-IP configuration is device-local.** `auth ldap system-auth` and `auth source`
+  are not carried by config-sync, so both units are configured explicitly. `auth remote-role`
+  *is* synced, but a role rule is inert on a unit that has no directory configured and is
+  still authenticating locally. Skipping the peer produces a demo that works until the first
+  failover and then fails every login on the new active unit.
 
 ## Decisions
 - [adr/0001-apm-first-auth-order.md](adr/0001-apm-first-auth-order.md) — APM proves the password before stepping up to Keycloak

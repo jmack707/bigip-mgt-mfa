@@ -46,7 +46,9 @@ the appliances can route to, never to `127.0.0.1`.
 
 If you change it after a deployment, re-run `scripts/gen-certs.sh` with `WL_REGEN_CA` unset
 (the leaf certificates are reissued, the CA is kept) and then `./deploy.sh --bigip`, or the
-BIG-IP's back-channel call to Keycloak fails validation on the SAN.
+BIG-IP's back-channel call to Keycloak fails validation on the SAN — which surfaces as an
+opaque APM error rather than as a certificate warning
+([troubleshooting.md](../operations/troubleshooting.md)).
 
 ## Directory
 | Variable | Default | Meaning |
@@ -237,11 +239,12 @@ group whose `type` is `sync-failover`. If none exists the unit is treated as sta
 the sync step is skipped rather than failed. Set the key explicitly when a unit belongs to
 several sync-failover groups and the first one returned is not the one you want.
 
-The sync is what carries the APM access tier from A to B. It is not what carries system
-authentication: `auth ldap` and `auth remote-role` live in the device-local configuration
-and are never synced, which is why `deploy.sh` runs `bigip/system-auth.sh` against both
-units. Skipping unit B produces a demo that works until the first failover and then makes
-everyone read-only.
+The sync is what carries the APM access tier from A to B, along with `auth remote-role`.
+It is not what carries system authentication: `auth ldap system-auth` and `auth source` live
+in the device-local configuration and are never synced, which is why `deploy.sh` runs
+`bigip/system-auth.sh` against both units. Skipping unit B leaves a unit that still
+authenticates locally, so the synced role rule has nothing to act on and the demo works only
+until the first failover.
 
 ## Derived and undocumented overrides
 These are read by the scripts but do not appear in `.env.example`. Most are derived and need

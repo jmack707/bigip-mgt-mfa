@@ -32,9 +32,22 @@ else
 fi
 chmod 0644 ca.crt
 
+# A leaf cert is only re-minted when it is missing or no longer verifies against the current
+# CA. Re-minting on every run would be invisible but wrong: the containers read their
+# certificate files once at process start, so a fresh cert on disk that nothing restarted for
+# means the running service still serves the old one, and the two disagree until something
+# unrelated restarts it. Re-issuing only when needed lets deploy.sh restart exactly then.
+REISSUED=0
+
 # issue <basename> <CN> <SAN-string>
 issue() {
   local base="$1" cn="$2" san="$3"
+  if [ "${WL_REGEN_CA:-0}" != 1 ] && [ -s "${base}.crt" ] && [ -s "${base}.key" ] \
+     && openssl verify -CAfile ca.crt "${base}.crt" >/dev/null 2>&1; then
+    echo "==> ${base}.crt still valid under the current CA — keeping it"
+    return 0
+  fi
+  REISSUED=1
   openssl req -newkey rsa:2048 -nodes -keyout "${base}.key" -out "${base}.csr" -subj "/CN=${cn}"
   printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\n' "$san" > "${base}-san.cnf"
   openssl x509 -req -in "${base}.csr" -CA ca.crt -CAkey ca.key -CAcreateserial \
@@ -56,7 +69,12 @@ issue webtop "${WL_WEBTOP_FQDN}" \
 if ! wl_is_bundled; then
   echo "==> external directory: skipping the LDAPS server cert;"
   echo "    the BIG-IP will validate LDAPS against ${WL_LDAP_CA_FILE}."
+  if [ "$REISSUED" = 1 ]; then touch .reissued; else rm -f .reissued; fi
   exit 0
 fi
 issue ldap "openldap.${WL_DOMAIN:-warden-lite.lab}" \
   "DNS:openldap.${WL_DOMAIN:-warden-lite.lab},DNS:openldap,IP:${WL_HOST_IP}"
+
+# Marker consumed by deploy.sh: the containers must be restarted to pick up new certs.
+# An if, not `[ ] && touch`, because under `set -e` a false test would abort the script.
+if [ "$REISSUED" = 1 ]; then touch .reissued; else rm -f .reissued; fi

@@ -14,9 +14,10 @@ in that order.
 
 Two things happen here and they are deliberately separate:
 
-- **`bigip/system-auth.sh`, on *both* units.** `auth ldap system-auth`, `auth remote-role` and
-  `auth source` are device-local configuration; a config-sync does **not** carry them to the
-  peer. This is the half that decides alice is an Administrator and bob is read-only, and the
+- **`bigip/system-auth.sh`, on *both* units.** `auth ldap system-auth` and `auth source` are
+  device-local configuration; a config-sync does **not** carry them to the peer. (`auth
+  remote-role` *is* synced, but a role rule is inert on a unit with no directory configured,
+  so running this on one unit only fails just the same.) This is the half that decides alice is an Administrator and bob is read-only, and the
   target BIG-IP decides it — not APM, not Keycloak
   ([adr/0003-authorization-on-remote-role.md](adr/0003-authorization-on-remote-role.md)).
 - **`bigip/apm-build.sh`, on unit A only.** The access tier: the VIP certificate, the AAA LDAP
@@ -166,8 +167,29 @@ git checkout <previous-revision>
 ./deploy.sh --bigip
 ```
 
-To back a unit out of remote authentication entirely, restore local-only admin auth **first** —
-this is the safe step and it is reversible by re-running `bigip/system-auth.sh`:
+To back the appliances out entirely:
+
+```bash
+./teardown.sh --bigip
+```
+
+The order it uses is deliberate. On **both** units it restores `auth source type local` and
+deletes the `warden_lite_admins` remote-role **first**, so a failure later cannot leave a unit
+pointed at a directory configuration that is about to disappear. `admin` and `root` are always
+local accounts, so this step cannot lock you out. Only then does it delete the access tier on
+unit A — the mutable graph from `wl_apm_objects` in `bigip/lib/objects.sh`, which is the same
+list the build tears down so the two cannot drift, followed by the supporting objects the build
+creates outside it (the shadow virtuals and their iRules, the portal resources, the webtop, the
+form-SSO object, the OAuth provider/server/request objects, the AAA LDAP server and its pool,
+the DNS resolver, and the two SSL profiles). It saves the config and triggers a config-sync so
+the peer drops them too.
+
+It deliberately leaves the trust anchors, the uploaded certificates and the demo CA in place:
+they are inert on their own, and removing them is not worth the chance of disturbing something
+else on a shared lab appliance.
+
+If you only want to restore local authentication and keep the access tier, do that one step by
+hand — it is reversible by re-running `bigip/system-auth.sh`:
 
 ```bash
 # on each unit, from tmsh
@@ -175,36 +197,5 @@ tmsh modify auth source type local
 tmsh save sys config
 ```
 
-The REST equivalent, from the Docker host, for both units at once:
-
-```bash
-for u in "${BIGIP_A_MGMT}" "${BIGIP_B_MGMT}"; do
-  curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" -X PATCH -H 'Content-Type: application/json' \
-    -d '{"type":"local"}' "https://${u}/mgmt/tm/auth/source" | jq -r .type
-done
-```
-
-`admin` and `root` are always local accounts, so this cannot lock you out — which is why it is
-the first thing to do and the last thing to undo.
-
-To remove the access tier, delete the same object list the build tears down, on unit A, then
-sync so the peer drops them too:
-
-```bash
-set -a; . ./.env; set +a
-. bigip/lib/objects.sh
-while IFS= read -r o; do
-  curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" -o /dev/null -w "DEL %{http_code}  ${o}\n" \
-    -X DELETE "https://${BIGIP_A_MGMT}/mgmt/tm/${o}"
-done < <(wl_apm_objects warden-lite Common)
-```
-
-That list is the mutable graph only. The supporting objects the build creates outside it all
-carry the `warden-lite` prefix — the AAA LDAP server and its pool, the `net dns-resolver`, the
-OAuth provider/server/request objects, the two shadow virtuals and their iRules, the form-SSO
-object, the webtop, the two portal-access resources, the customization groups, the client-SSL
-and server-SSL profiles and the uploaded certificates. Remove them by name if you want the
-device clean; leaving them costs nothing and a later re-run reuses them.
-
-Finish with a config-sync from A so the peer matches, and confirm with
-`./scripts/validate.sh` that the checks now fail in the way you intended.
+Confirm with `./scripts/validate.sh` that the checks now fail in the way you intended, and log
+in to both TMUIs as the local `admin` before you walk away.

@@ -24,8 +24,10 @@ The role is decided by each BIG-IP, in its own configuration:
 - `auth remote-user` sets the default role to `guest` with console access disabled.
 - One `remote-role` rule maps `memberOf=<admin group DN>` to `administrator`.
 
-Both units are configured identically and explicitly, because `auth ldap` and `remote-role`
-are device-local and are **not** carried by config-sync.
+Both units are configured identically and explicitly. `auth ldap system-auth` and
+`auth source` are device-local and are **not** carried by config-sync. `auth remote-role`
+*is* synced, but that does not remove the need: a synced role rule is inert on a unit with no
+directory configured, still authenticating locally.
 
 ## Consequences
 The demo's central claim survives inspection: alice is an administrator and bob is read-only
