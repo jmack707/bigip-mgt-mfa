@@ -1,0 +1,20 @@
+# Grant the read-only bind account search access across the directory base. osixia/openldap
+# ships a deny-all catch-all, so cn=bigip-bind (a plain inetOrgPerson) otherwise cannot
+# search and lookups fail with "No such object (32)". Three consumers bind with it: the APM
+# AAA LDAP object (authenticate the user's password), the BIG-IP's auth ldap system-auth
+# (resolve the user and read memberOf for remote-role), and Keycloak's LDAP federation.
+#
+# The grant sits BEFORE the catch-all and AFTER the userPassword rule ({1}), so bigip-bind
+# reads uid/cn/memberOf but NEVER userPassword — password verification happens by BIND, so
+# nothing in this demo ever needs to read a password hash.
+#
+# Applied against cn=config over ldapi (EXTERNAL) — cn=config is not reachable with the
+# directory admin bind:
+#   docker exec -i openldap ldapmodify -Y EXTERNAL -H ldapi:/// < ldap/acl-bigip-bind.ldif
+dn: olcDatabase={1}mdb,cn=config
+changetype: modify
+replace: olcAccess
+olcAccess: {0}to * by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth manage by * break
+olcAccess: {1}to attrs=userPassword,shadowLastChange by self write by dn="cn=admin,${BASE_DN}" write by anonymous auth by * none
+olcAccess: {2}to dn.subtree="${BASE_DN}" by dn.exact="${WL_BIND_DN}" read by self read by dn="cn=admin,${BASE_DN}" write by * none
+olcAccess: {3}to * by self read by dn="cn=admin,${BASE_DN}" write by * none

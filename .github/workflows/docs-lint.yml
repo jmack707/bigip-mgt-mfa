@@ -1,0 +1,69 @@
+name: docs-lint
+
+# Fails the pull request when documentation drifts from doc-standard.json.
+# The linter is vendored at .github/scripts/doc_lint.py rather than fetched at
+# run time: the check then works on self-hosted and air-gapped runners and cannot
+# break because an upstream repository moved.
+#
+# Adopting this on a repo with pre-existing findings? Record them once:
+#   python3 .github/scripts/doc_lint.py --write-baseline .doclint-baseline.json
+# and commit that file. The run below picks it up automatically when present, so
+# CI fails only on NEW findings. Shrink the baseline over time; never add to it.
+
+on:
+  pull_request:
+    branches: ["**"]
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docs-lint:
+    name: Documentation standard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # DOC013 compares commit timestamps of docs against the code they
+          # document, which needs history rather than a single shallow commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Assemble lint options
+        id: opts
+        run: |
+          opts=""
+          if [ -f .doclint-baseline.json ]; then
+            opts="--baseline .doclint-baseline.json"
+            echo "Baseline present: failing only on new findings."
+          fi
+          echo "opts=$opts" >> "$GITHUB_OUTPUT"
+
+      - name: Lint documentation (annotations)
+        run: python3 .github/scripts/doc_lint.py --format github ${{ steps.opts.outputs.opts }}
+
+      - name: Lint documentation (summary)
+        if: always()
+        run: |
+          python3 .github/scripts/doc_lint.py ${{ steps.opts.outputs.opts }} \
+            > docs-lint.txt 2>&1 || true
+          {
+            echo '## Documentation standard'
+            echo '```text'
+            cat docs-lint.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-lint-report
+          path: docs-lint.txt
+          if-no-files-found: ignore

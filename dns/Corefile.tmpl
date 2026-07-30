@@ -1,0 +1,19 @@
+# Rendered by deploy.sh (envsubst) to dns/Corefile. Authoritative for the demo zone only;
+# everything else is forwarded upstream, so pointing a workstation or the BIG-IP at this
+# resolver does not break the rest of its name resolution.
+${WL_DOMAIN}:53 {
+    hosts {
+        ${WL_HOST_IP}   ${WL_KEYCLOAK_FQDN}
+        ${WL_APM_VIP}   ${WL_WEBTOP_FQDN}
+        fallthrough
+    }
+    log
+    errors
+}
+
+.:53 {
+    forward . ${WL_DNS_UPSTREAM}
+    cache 30
+    log
+    errors
+}

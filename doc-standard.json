@@ -1,0 +1,285 @@
+{
+  "standard_version": "1.1",
+  "preset": "service",
+  "_comment": "Repository documentation standard, service preset. Single source of truth for the docs lint (.github/scripts/doc_lint.py, vendored so the check works offline). Relax a rule here and record why in an ADR.",
+  "scan": {
+    "doc_globs": [
+      "README.md",
+      "CONTRIBUTING.md",
+      "CHANGELOG.md",
+      "docs/**/*.md"
+    ],
+    "exclude_dirs": [
+      ".git",
+      ".github",
+      "node_modules",
+      "venv",
+      ".venv",
+      "site-packages",
+      "vendor"
+    ]
+  },
+  "placeholders": {
+    "severity": "error",
+    "patterns": [
+      "TODO",
+      "TBD",
+      "FIXME",
+      "<placeholder>",
+      "<!-- fill",
+      "coming soon",
+      "not yet documented"
+    ]
+  },
+  "links": {
+    "severity": "error",
+    "anchor_severity": "error"
+  },
+  "code_fence_language": {
+    "severity": "warn"
+  },
+  "required_files": [
+    {
+      "path": "README.md",
+      "severity": "error",
+      "sections": [
+        "What this is",
+        "Quickstart",
+        "Topology",
+        "Components",
+        "Verification",
+        "Documentation",
+        "License"
+      ],
+      "template": "README.md"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "severity": "warn",
+      "sections": [
+        "Development setup",
+        "Testing",
+        "Documentation",
+        "Pull requests"
+      ],
+      "template": "CONTRIBUTING.md"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "severity": "warn",
+      "sections": [],
+      "template": "CHANGELOG.md"
+    },
+    {
+      "path": "docs/architecture.md",
+      "severity": "error",
+      "sections": [
+        "Context",
+        "Components",
+        "Data flow",
+        "Trust boundaries",
+        "Constraints and non-goals",
+        "Decisions"
+      ],
+      "template": "architecture.md"
+    },
+    {
+      "path": "docs/install.md",
+      "severity": "error",
+      "sections": [
+        "Prerequisites",
+        "Procedure",
+        "Verification",
+        "Uninstall"
+      ],
+      "template": "install.md"
+    },
+    {
+      "path": "docs/deploy.md",
+      "severity": "error",
+      "sections": [
+        "Scope",
+        "Prerequisites",
+        "Procedure",
+        "Idempotency",
+        "Verification",
+        "Rollback"
+      ],
+      "template": "deploy.md"
+    },
+    {
+      "path": "docs/upgrade.md",
+      "severity": "error",
+      "sections": [
+        "Supported paths",
+        "Pre-upgrade checks",
+        "Procedure",
+        "Verification",
+        "Rollback",
+        "Teardown"
+      ],
+      "template": "upgrade.md"
+    },
+    {
+      "path": "docs/operations/troubleshooting.md",
+      "severity": "error",
+      "sections": [
+        "Symptom index"
+      ],
+      "template": "troubleshooting.md"
+    },
+    {
+      "path": "docs/reference/configuration.md",
+      "severity": "error",
+      "sections": [
+        "Overview"
+      ],
+      "template": "reference-configuration.md"
+    },
+    {
+      "path": "docs/reference/cli.md",
+      "severity": "error",
+      "sections": [
+        "Overview"
+      ],
+      "template": "reference-cli.md"
+    },
+    {
+      "path": "docs/reference/api.md",
+      "severity": "error",
+      "sections": [
+        "Overview",
+        "Endpoints",
+        "Status codes",
+        "Content types"
+      ],
+      "template": "reference-api.md"
+    }
+  ],
+  "required_globs": [
+    {
+      "label": "ADR",
+      "glob": "docs/adr/[0-9][0-9][0-9][0-9]-*.md",
+      "min_count": 1,
+      "severity": "error",
+      "sections": [
+        "Status",
+        "Context",
+        "Decision",
+        "Consequences"
+      ],
+      "template": "adr-NNNN-slug.md",
+      "scaffold_as": "docs/adr/0001-record-the-first-decision.md"
+    },
+    {
+      "label": "runbook",
+      "glob": "docs/operations/runbooks/*.md",
+      "min_count": 1,
+      "severity": "error",
+      "sections": [
+        "When to use this",
+        "Prerequisites",
+        "Procedure",
+        "Verification",
+        "Rollback",
+        "Escalation"
+      ],
+      "template": "runbook.md",
+      "scaffold_as": "docs/operations/runbooks/example-task.md"
+    }
+  ],
+  "readme_max_lines": 250,
+  "readme_max_lines_severity": "warn",
+  "require_command_block": {
+    "severity": "warn",
+    "sections": [
+      "Procedure",
+      "Verification",
+      "Rollback",
+      "Uninstall",
+      "Teardown",
+      "Pre-upgrade checks"
+    ]
+  },
+  "validation_stamp": {
+    "severity": "warn",
+    "max_age_months": 12,
+    "required_in": [
+      "docs/install.md",
+      "docs/deploy.md",
+      "docs/upgrade.md"
+    ],
+    "required_globs": [
+      "docs/operations/runbooks/*.md"
+    ]
+  },
+  "freshness": {
+    "severity": "warn",
+    "pairs": [
+      {
+        "doc": "docs/reference/configuration.md",
+        "code": [
+          "*.env.example",
+          "*.service",
+          "Dockerfile",
+          "docker-compose.yml"
+        ]
+      },
+      {
+        "doc": "docs/reference/cli.md",
+        "code": [
+          "*.py",
+          "*.sh",
+          "bin/*",
+          "scripts/*"
+        ]
+      },
+      {
+        "doc": "docs/architecture.md",
+        "code": [
+          "*.tcl",
+          "*.tf"
+        ]
+      }
+    ]
+  },
+  "drift": {
+    "configuration": {
+      "severity": "error",
+      "doc": "docs/reference/configuration.md",
+      "env_globs": [
+        "*.env.example",
+        "**/*.env.example",
+        ".env.example"
+      ]
+    },
+    "cli": {
+      "severity": "error",
+      "doc": "docs/reference/cli.md",
+      "entrypoint_globs": [
+        "*.py",
+        "*.sh",
+        "bin/*",
+        "scripts/*.py",
+        "scripts/*.sh",
+        "tools/*.py",
+        "tools/*.sh"
+      ],
+      "exclude": [
+        "setup.py",
+        "conftest.py",
+        "doc_lint.py",
+        "scaffold_docs.py"
+      ],
+      "exclude_dirs": [
+        "tests",
+        "test"
+      ]
+    },
+    "flags": {
+      "severity": "error",
+      "doc": "docs/reference/cli.md",
+      "note": "Python entry points only \u2014 shell flag parsing is too unreliable to enforce."
+    }
+  }
+}
