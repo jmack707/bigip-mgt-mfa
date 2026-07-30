@@ -13,14 +13,14 @@ apm/policy/access-policy/~${part}~${p}
 apm/policy/policy-item/~${part}~${p}_ent
 apm/policy/policy-item/~${part}~${p}_act_logon
 apm/policy/policy-item/~${part}~${p}_act_ldapauth
-apm/policy/policy-item/~${part}~${p}_act_oauth
+apm/policy/policy-item/~${part}~${p}_act_kcverify
 apm/policy/policy-item/~${part}~${p}_act_ssomap
 apm/policy/policy-item/~${part}~${p}_act_resourceassign
 apm/policy/policy-item/~${part}~${p}_end_allow
 apm/policy/policy-item/~${part}~${p}_end_deny
 apm/policy/agent/logon-page/~${part}~${p}_act_logon_ag
 apm/policy/agent/aaa-ldap/~${part}~${p}_act_ldapauth_ag
-apm/policy/agent/aaa-oauth/~${part}~${p}_act_oauth_ag
+apm/policy/agent/irule-event/~${part}~${p}_act_kcverify_ag
 apm/policy/agent/variable-assign/~${part}~${p}_act_ssomap_ag
 apm/policy/agent/resource-assign/~${part}~${p}_act_resourceassign_ag
 apm/policy/agent/ending-allow/~${part}~${p}_end_allow_ag

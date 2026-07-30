@@ -3,15 +3,22 @@
 # the peer (deploy.sh triggers the sync).
 #
 # Policy graph:
-#   Start -> Logon Page -> LDAP Auth -> OAuth Client (Keycloak, TOTP) -> SSO Credential
-#            Mapping -> Resource Assign -> Allow
+#   Start -> Logon Page (username + password + one-time code)
+#         -> LDAP Auth  (the directory proves the password)
+#         -> Keycloak Verify (ONE direct-grant call proves password AND OTP together)
+#         -> SSO Credential Mapping -> Resource Assign -> Allow
 #   any failure -> Deny
 #
-# The ordering is the whole design. APM collects the password and proves it against the
-# directory FIRST, which means the password is in the session and can be single-signed-on
-# to TMUI. Only then does it step up to Keycloak for the second factor. Reverse the order
-# (Keycloak first, as a plain OIDC relying party) and APM never sees a password, which is
-# why that design needs a vault. See docs/adr/0001-apm-first-auth-order.md.
+# One screen, no redirect. The user reads their code from the authenticator they enrolled
+# at Keycloak and types all three values here; APM posts username+password+otp to Keycloak's
+# token endpoint in a single call, so Keycloak validates both factors against ONE identity
+# atomically. A valid password paired with somebody else's authenticator is rejected by
+# Keycloak, not by a comparison we have to remember to write.
+#
+# An earlier revision redirected to Keycloak for OIDC step-up. It asked for the username
+# twice, needed a password-less realm no customer would run, and — because nothing compared
+# the token subject to the user APM had authenticated — accepted anyone else's second
+# factor. See docs/adr/0002-single-logon-page-direct-grant.md.
 #
 # Idempotent: the mutable policy graph is torn down and rebuilt; everything else tolerates
 # 409 (already exists).
@@ -33,9 +40,8 @@ AAA=${P}-ldap-aaa
 VIP_IP="${WL_APM_VIP:?set WL_APM_VIP in .env}"
 SHADOW_A="${WL_SHADOW_A:-192.0.2.5}"
 SHADOW_B="${WL_SHADOW_B:-192.0.2.6}"
-RESOLVER=${P}-resolver
-PROVIDER=${P}-keycloak
-OAUTH_SRV=${P}-oauth-server
+KC_AAA=${P}-keycloak-otp
+SHADOW_KC="${WL_SHADOW_KC:-192.0.2.7}"   # non-routable façade for the Keycloak call
 KC_BASE="https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}/realms/${WL_KEYCLOAK_REALM}"
 
 step(){ echo; echo "== $* =="; }
@@ -95,26 +101,34 @@ step "3. AAA LDAP server (password check happens here, by BIND)"
 # wrap so the DN commas pass through tmsh intact.
 bash_cmd "tmsh create ltm pool ${AAA}-pool { members add { ${WL_LDAP_HOST}:${WL_LDAP_PORT} } monitor tcp } ; tmsh create apm aaa ldap ${AAA} { pool ${AAA}-pool port ${WL_LDAP_PORT} admin-dn \"${WL_BIND_DN}\" admin-encrypted-password \"${WL_BIND_PW}\" base-dn \"${WL_USER_SEARCH_BASE}\" }"
 
-step "4. DNS resolver -> the demo zone (CoreDNS on the stack host)"
-# TMM resolves OAuth endpoints itself and does NOT read the BIG-IP's /etc/hosts, so the
-# resolver is mandatory, not a nicety. warden-lite ships the DNS server it points at.
-bash_cmd "tmsh create net dns-resolver ${RESOLVER} { forward-zones add { ${WL_DOMAIN} { nameservers add { ${WL_HOST_IP}:${WL_DNS_PORT:-53} } } } route-domain 0 }"
+step "4. layered virtual server for the Keycloak call"
+# APM's HTTP auth agent refuses an https:// backend outright ("Using Http auth agent against
+# SSL backend is not allowed, please, create a layered virtual server with serverssl
+# profile"). So APM speaks plain HTTP to a non-routable façade on this same device, and the
+# BIG-IP re-encrypts to Keycloak with a server-side profile that validates the demo CA. The
+# cleartext hop never leaves TMM; the hop that crosses the network is TLS.
+add "$B/mgmt/tm/ltm/pool" "$(jq -n --arg n "${P}-kc-pool" --arg m "${WL_HOST_IP}:${WL_KEYCLOAK_PORT}" \
+  '{name:$n,partition:"Common",monitor:"/Common/tcp",members:[{name:$m}]}')"
+# Validate Keycloak properly rather than trusting anything: our CA, and the certificate must
+# actually be for the Keycloak name (SNI set to match, or the handshake gets the wrong vhost).
+add "$B/mgmt/tm/ltm/profile/server-ssl" "$(jq -n --arg n "${P}-serverssl-kc" --arg ca "/$PART/${P}-ca.crt" --arg sn "${WL_KEYCLOAK_FQDN}" \
+  '{name:$n,partition:"Common",defaultsFrom:"/Common/serverssl",caFile:$ca,peerCertMode:"require",authenticate:"once",authenticateName:$sn,serverName:$sn}')"
+# The façade address is not the name on Keycloak's certificate, and Keycloak is issuing
+# tokens whose issuer is bound to its configured hostname — so put the real Host back.
+add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-kc-host" --arg b "when HTTP_REQUEST {
+    HTTP::header replace Host \"${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}\"
+}" '{name:$n,partition:"Common",apiAnonymous:$b}')"
+add "$B/mgmt/tm/ltm/virtual" "$(jq -n --arg n "${P}-kc-vs" --arg d "/$PART/${SHADOW_KC}:80" \
+  --arg p "/$PART/${P}-kc-pool" --arg ss "/$PART/${P}-serverssl-kc" --arg ir "/$PART/${P}-kc-host" \
+  '{name:$n,partition:"Common",destination:$d,mask:"255.255.255.255",ipProtocol:"tcp",pool:$p,
+    profiles:[{name:"/Common/tcp"},{name:"/Common/http"},{name:$ss,context:"serverside"}],
+    rules:[$ir],sourceAddressTranslation:{type:"automap"}}')"
 
-step "5. OAuth provider + server (Keycloak as the second factor)"
-bash_cmd "tmsh create apm aaa oauth-provider ${PROVIDER} { type custom authentication-uri ${KC_BASE}/protocol/openid-connect/auth token-uri ${KC_BASE}/protocol/openid-connect/token userinfo-request-uri ${KC_BASE}/protocol/openid-connect/userinfo openid-cfg-uri ${KC_BASE}/.well-known/openid-configuration trusted-ca-bundle /Common/${P}-ca.crt use-auto-jwt-config true }"
-# Our own request objects: the shipped templates are vendor-shaped (Okta/Ping carry
-# offline_access, the F5 ones carry a token_content_type Keycloak does not use). These are
-# plain OIDC authorization-code. APM appends `code` to the token request itself.
-# `type` is not optional: it tells TMOS which leg of the exchange the object describes, and
-# omitting it makes the object default to scope-data-request, which then fails validation
-# demanding a URI. The URI itself comes from the provider, so it stays `none` here.
-# The scope parameter carries NO value: APM substitutes the scope configured on the agent.
-# Setting it in both places is what produces `scope=openid openid` on the wire.
-# delete-then-create so a re-run converges (tmsh create alone is not idempotent).
-bash_cmd "tmsh delete apm aaa oauth-request ${P}-auth-redirect 2>/dev/null; tmsh create apm aaa oauth-request ${P}-auth-redirect { type auth-redirect-request method get parameters add { client_id { type client-id } redirect_uri { type redirect-uri } response_type { type response-type } scope { type scope } } }"
-bash_cmd "tmsh delete apm aaa oauth-request ${P}-token-by-code 2>/dev/null; tmsh create apm aaa oauth-request ${P}-token-by-code { type token-request method post parameters add { client_id { type client-id } client_secret { type client-secret } grant_type { type grant-type } redirect_uri { type redirect-uri } } }"
-bash_cmd "tmsh delete apm aaa oauth-request ${P}-token-refresh 2>/dev/null; tmsh create apm aaa oauth-request ${P}-token-refresh { type token-refresh-request method post parameters add { client_id { type client-id } client_secret { type client-secret } grant_type { type custom value refresh_token } } }"
-bash_cmd "tmsh create apm aaa oauth-server ${OAUTH_SRV} { mode client provider-name ${PROVIDER} client-id ${WL_OIDC_CLIENT_ID} client-secret ${WL_OIDC_CLIENT_SECRET} dns-resolver-name ${RESOLVER} client-serverssl-profile-name /Common/${P}-serverssl-oauth }"
+step "5. Keycloak verification iRule"
+# envsubst is restricted to OUR placeholders so the iRule's own $vars survive untouched.
+KC_IRULE_BODY="$(SHADOW_KC="$SHADOW_KC" envsubst '${WL_OIDC_CLIENT_ID} ${WL_OIDC_CLIENT_SECRET} ${WL_KEYCLOAK_REALM} ${WL_KEYCLOAK_FQDN} ${WL_KEYCLOAK_PORT} ${SHADOW_KC}' < "${HERE}/apm-keycloak-otp.irule")"
+curl "${A[@]}" -o /dev/null -w "  DEL previous rule -> %{http_code}\n" -X DELETE "$B/mgmt/tm/ltm/rule/~${PART}~${P}-kc-verify"
+add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-kc-verify" --arg b "$KC_IRULE_BODY" '{name:$n,partition:"Common",apiAnonymous:$b}')"
 
 step "6. customization groups"
 add "$B/mgmt/tm/apm/policy/customization-group" "$(jq -n --arg n "${P}_act_logon_ag" '{name:$n,partition:"Common",source:"/Common/modern",type:"logon"}')"
@@ -124,23 +138,20 @@ for grp in logout:logout eps:eps errormap:errormap framework_installation:framew
   add "$B/mgmt/tm/apm/policy/customization-group" "$(jq -n --arg n "${P}_${grp%%:*}" --arg t "${grp##*:}" '{name:$n,partition:"Common",source:"/Common/modern",type:$t}')"
 done
 
-step "7. agents: logon page, LDAP auth, OAuth client, SSO mapping, resource assign"
+step "7. agents: logon page, LDAP auth, Keycloak verify, SSO mapping, resource assign"
 add "$B/mgmt/tm/apm/policy/agent/logon-page" "$(jq -n --arg n "${P}_act_logon_ag" --arg cg "/$PART/${P}_act_logon_ag" \
   '{name:$n,partition:"Common",customizationGroup:$cg,
     fieldType1:"text",postVarName1:"username",sessionVarName1:"username",fieldModifiable1:"true",
-    fieldType2:"password",postVarName2:"password",sessionVarName2:"password",fieldModifiable2:"true"}')"
+    fieldType2:"password",postVarName2:"password",sessionVarName2:"password",fieldModifiable2:"true",
+    fieldType3:"password",postVarName3:"otp",sessionVarName3:"otp",fieldModifiable3:"true"}')"
 # LDAP Auth (type=auth): APM locates the entry with the filter, then BINDS as that user to
 # prove the password. Nothing reads a password hash, which is why the bind account needs no
 # privilege beyond search.
 add "$B/mgmt/tm/apm/policy/agent/aaa-ldap" "$(jq -n --arg n "${P}_act_ldapauth_ag" --arg s "/$PART/$AAA" \
   --arg base "${WL_USER_SEARCH_BASE}" --arg f "(${WL_LOGIN_ATTR}=%{session.logon.last.username})" \
   '{name:$n,partition:"Common",type:"auth",server:$s,searchDn:$base,filter:$f,maxLogonAttempt:3}')"
-add "$B/mgmt/tm/apm/policy/agent/aaa-oauth" "$(jq -n --arg n "${P}_act_oauth_ag" --arg s "/$PART/${OAUTH_SRV}" \
-  --arg ar "/$PART/${P}-auth-redirect" --arg tr "/$PART/${P}-token-by-code" --arg rr "/$PART/${P}-token-refresh" \
-  --arg ru "https://${WL_WEBTOP_FQDN}/oauth/client/redirect" \
-  '{name:$n,partition:"Common",type:"client",grantType:"authorization-code",server:$s,
-    authRedirectRequest:$ar,tokenRequest:$tr,tokenRefreshRequest:$rr,
-    redirectionUri:$ru,scope:"openid"}')"
+add "$B/mgmt/tm/apm/policy/agent/irule-event" "$(jq -n --arg n "${P}_act_kcverify_ag" \
+  '{name:$n,partition:"Common",id:"kc_verify"}')"
 # SSO Credential Mapping: hand the webtop resources the credential the user already proved.
 # This is the entire "single sign-on" of the demo — no vault, no shared account.
 add "$B/mgmt/tm/apm/policy/agent/variable-assign" "$(jq -n --arg n "${P}_act_ssomap_ag" \
@@ -214,19 +225,16 @@ tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_resourceassign"),partition:"Co
 tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_ssomap"),partition:"Common",caption:"SSO Credential Mapping",color:1,itemType:"action",loop:"false",
   agents:[{name:($p+"_act_ssomap_ag"),partition:"Common",type:"variable-assign"}],
   rules:[{caption:"fallback",nextItem:("/Common/"+$p+"_act_resourceassign")}]}')"
-# OAuth Client: Keycloak has verified the TOTP. Anything other than a successful token
-# exchange is a Deny — a failed second factor must not degrade to first-factor-only access.
-# `eq {}` rather than the VPE's usual `== ""`: an empty double-quoted literal does not
-# survive the trip through REST into the stored rule, and what lands on the box is
-# `... == ` — a Tcl syntax error that fails the branch and denies every successful login.
-# Braces carry an empty string through intact.
-tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_oauth"),partition:"Common",caption:"MFA (Keycloak OIDC)",color:1,itemType:"action",loop:"false",
-  agents:[{name:($p+"_act_oauth_ag"),partition:"Common",type:"aaa-oauth"}],
-  rules:[{caption:"Successful",expression:"expr {[mcget {session.oauth.client.last.errMsg}] eq {}}",nextItem:("/Common/"+$p+"_act_ssomap")},
+# Keycloak Verify: one direct-grant call that proves the password AND the one-time code
+# belong to the same user. Anything but a clean success is a Deny — a failed second factor
+# must never degrade to first-factor-only access.
+tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_kcverify"),partition:"Common",caption:"MFA (Keycloak)",color:1,itemType:"action",loop:"false",
+  agents:[{name:($p+"_act_kcverify_ag"),partition:"Common",type:"irule-event"}],
+  rules:[{caption:"Successful",expression:"expr {[mcget {session.custom.kc.verified}] == 1}",nextItem:("/Common/"+$p+"_act_ssomap")},
          {caption:"fallback",nextItem:("/Common/"+$p+"_end_deny")}]}')"
 tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_ldapauth"),partition:"Common",caption:"LDAP Auth",color:1,itemType:"action",loop:"false",
   agents:[{name:($p+"_act_ldapauth_ag"),partition:"Common",type:"aaa-ldap"}],
-  rules:[{caption:"Successful",expression:"expr {[mcget {session.ldap.last.authresult}] == 1}",nextItem:("/Common/"+$p+"_act_oauth")},
+  rules:[{caption:"Successful",expression:"expr {[mcget {session.ldap.last.authresult}] == 1}",nextItem:("/Common/"+$p+"_act_kcverify")},
          {caption:"fallback",nextItem:("/Common/"+$p+"_end_deny")}]}')"
 tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_logon"),partition:"Common",caption:"Logon Page",color:1,itemType:"action",loop:"false",
   agents:[{name:($p+"_act_logon_ag"),partition:"Common",type:"logon-page"}],
@@ -234,7 +242,7 @@ tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_logon"),partition:"Common",cap
 tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_ent"),partition:"Common",caption:"Start",color:1,itemType:"entry",loop:"false",
   rules:[{caption:"fallback",nextItem:("/Common/"+$p+"_act_logon")}]}')"
 tadd "$B/mgmt/tm/apm/policy/access-policy/" "$(jq -n --arg p "$P" '{name:$p,partition:"Common",type:"access-policy",startItem:($p+"_ent"),defaultEnding:($p+"_end_deny"),maxMacroLoopCount:1,oneshotMacro:"false",
-  items:[{name:($p+"_ent"),partition:"Common"},{name:($p+"_act_logon"),partition:"Common"},{name:($p+"_act_ldapauth"),partition:"Common"},{name:($p+"_act_oauth"),partition:"Common"},{name:($p+"_act_ssomap"),partition:"Common"},{name:($p+"_act_resourceassign"),partition:"Common"},{name:($p+"_end_allow"),partition:"Common"},{name:($p+"_end_deny"),partition:"Common"}]}')"
+  items:[{name:($p+"_ent"),partition:"Common"},{name:($p+"_act_logon"),partition:"Common"},{name:($p+"_act_ldapauth"),partition:"Common"},{name:($p+"_act_kcverify"),partition:"Common"},{name:($p+"_act_ssomap"),partition:"Common"},{name:($p+"_act_resourceassign"),partition:"Common"},{name:($p+"_end_allow"),partition:"Common"},{name:($p+"_end_deny"),partition:"Common"}]}')"
 tadd "$B/mgmt/tm/apm/profile/access/" "$(jq -n --arg p "$P" '{name:$p,partition:"Common",acceptLanguages:["en"],defaultLanguage:"en",accessPolicy:("/Common/"+$p),customizationGroup:("/Common/"+$p+"_logout"),epsGroup:("/Common/"+$p+"_eps"),errormapGroup:("/Common/"+$p+"_errormap"),frameworkInstallationGroup:("/Common/"+$p+"_framework_installation"),generalUiGroup:("/Common/"+$p+"_general_ui"),type:"all",scope:"profile",accessPolicyTimeout:300,inactivityTimeout:900,maxSessionTimeout:604800,logoutUriTimeout:5,maxConcurrentSessions:0,maxInProgressSessions:128,maxFailureDelay:5,minFailureDelay:2,secureCookie:"true",persistentCookie:"false",restrictToSingleClientIp:"false",userIdentityMethod:"http",logSettings:["/Common/default-log-setting"]}')"
 echo "  committing transaction..."
 curl "${A[@]}" -o /tmp/wl-apm.out -w '  commit -> %{http_code}\n' -X PATCH -H 'Content-Type: application/json' -d '{"state":"VALIDATING"}' "$B/mgmt/tm/transaction/$TID"
@@ -244,10 +252,10 @@ step "11. the webtop virtual server ${VIP_IP}:443"
 # traffic-group so the VIP floats: the access tier itself survives a failover, which is the
 # point of putting it on the pair rather than beside it.
 add "$B/mgmt/tm/ltm/virtual" "$(jq -n --arg n "${P}-vs" --arg d "/$PART/${VIP_IP}:443" --arg cs "/$PART/${P}-clientssl" \
-  --arg ap "/$PART/$P" --arg rs "/$PART/${P}-referer-strip" --arg cp "/$PART/${P}-connectivity" \
+  --arg ap "/$PART/$P" --arg rs "/$PART/${P}-referer-strip" --arg cp "/$PART/${P}-connectivity" --arg kc "/$PART/${P}-kc-verify" \
   '{name:$n,partition:"Common",destination:$d,mask:"255.255.255.255",ipProtocol:"tcp",
     profiles:[{name:"/Common/tcp"},{name:"/Common/http"},{name:$cs,context:"clientside"},{name:"/Common/serverssl",context:"serverside"},{name:$ap},{name:$cp},{name:"/Common/rewrite-portal"},{name:"/Common/rba"},{name:"/Common/ppp"},{name:"/Common/websso"}],
-    rules:[$rs],sourceAddressTranslation:{type:"automap"}}')"
+    rules:[$kc,$rs],sourceAddressTranslation:{type:"automap"}}')"
 # Pin the traffic group EXPLICITLY. A virtual-address in an HA pair already defaults to
 # traffic-group-1, so the webtop would float anyway — but "it happens to inherit the right
 # default" is not the same claim as "the demo configures the access tier to survive a

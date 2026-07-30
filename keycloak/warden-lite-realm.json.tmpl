@@ -1,5 +1,5 @@
 {
-  "_comment": "Rendered by deploy.sh (envsubst) to keycloak/import/ and imported at container start. Do not edit the rendered copy — it is gitignored and overwritten on every deploy.",
+  "_comment": "Rendered by deploy.sh (envsubst, then jq strips every _comment key) to keycloak/import/ and imported at container start. Do not edit the rendered copy — it is gitignored and overwritten on every deploy.",
   "realm": "${WL_KEYCLOAK_REALM}",
   "enabled": true,
   "sslRequired": "external",
@@ -22,6 +22,7 @@
   "otpPolicyInitialCounter": 0,
   "otpSupportedApplications": ["totpAppFreeOTPName", "totpAppGoogleName", "totpAppMicrosoftAuthenticatorName"],
 
+  "_comment_enrolment": "CONFIGURE_TOTP stays a default required action so a user must enrol an authenticator the first time they sign in to Keycloak's own Account Console. That console is where enrolment happens — the BIG-IP never enrols anyone, it only verifies. A user who has not enrolled cannot satisfy the direct-grant flow below and therefore cannot log in at the appliance, which is the correct order of operations.",
   "requiredActions": [
     {
       "alias": "CONFIGURE_TOTP",
@@ -34,17 +35,20 @@
     }
   ],
 
-  "_comment_flow": "Second-factor-ONLY browser flow. APM has already proven the password against the directory before it redirects here, so asking for it again would be a second password prompt for no added assurance. Username Form re-establishes which identity is being stepped up; OTP Form is the actual factor. auth-cookie is deliberately absent so every redirect re-runs OTP and the demo is deterministic. SECURITY: this realm is a second-factor oracle, not a standalone IdP — do not point another application at it. See docs/adr/0002-second-factor-only-realm.md.",
+  "_comment_browser_flow": "The browser flow is left as Keycloak's stock 'browser' flow — username and password, then conditional OTP. This realm is an ordinary identity provider that a customer would recognise, used here for self-service MFA enrolment at the Account Console. An earlier revision replaced it with a password-less username+OTP flow so APM could step up to it; that made the realm unusable for anything else and, worse, left the second factor unbound from the first. See docs/adr/0002-single-logon-page-direct-grant.md.",
+  "browserFlow": "browser",
+
+  "_comment_direct_grant": "This is how the BIG-IP verifies a login. APM posts username + password + otp to the token endpoint in ONE call, and Keycloak validates all three against the same identity atomically — so a valid password paired with somebody else's authenticator is rejected. OTP is REQUIRED, not CONDITIONAL: the stock direct-grant flow only demands an OTP from users who happen to have one configured, which would let an un-enrolled account through on a password alone.",
   "authenticationFlows": [
     {
-      "alias": "warden-lite second factor",
-      "description": "Username Form then OTP Form. No password — APM already checked it.",
+      "alias": "warden-lite direct grant",
+      "description": "username + password + OTP validated together, for the BIG-IP APM logon page",
       "providerId": "basic-flow",
       "topLevel": true,
       "builtIn": false,
       "authenticationExecutions": [
         {
-          "authenticator": "auth-username-form",
+          "authenticator": "direct-grant-validate-username",
           "authenticatorFlow": false,
           "requirement": "REQUIRED",
           "priority": 10,
@@ -52,46 +56,47 @@
           "userSetupAllowed": false
         },
         {
-          "authenticator": "auth-otp-form",
+          "authenticator": "direct-grant-validate-password",
           "authenticatorFlow": false,
           "requirement": "REQUIRED",
           "priority": 20,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "direct-grant-validate-otp",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 30,
           "autheticatorFlow": false,
           "userSetupAllowed": false
         }
       ]
     }
   ],
-  "browserFlow": "warden-lite second factor",
+  "directGrantFlow": "warden-lite direct grant",
 
   "clients": [
     {
       "clientId": "${WL_OIDC_CLIENT_ID}",
-      "name": "BIG-IP APM webtop",
-      "description": "The APM access profile, acting as an OIDC relying party for step-up MFA.",
+      "name": "BIG-IP APM logon page",
+      "description": "Confidential client the BIG-IP uses to verify username+password+OTP in a single direct-grant call. No browser redirect is involved.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
       "bearerOnly": false,
       "secret": "${WL_OIDC_CLIENT_SECRET}",
-      "standardFlowEnabled": true,
+      "_comment_flags": "standardFlow is OFF: APM is no longer an OIDC relying party and never redirects a browser here, so an authorization-code flow would be unused attack surface. directAccessGrants is the only flow this client needs.",
+      "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
+      "directAccessGrantsEnabled": true,
       "serviceAccountsEnabled": false,
-      "redirectUris": [
-        "https://${WL_WEBTOP_FQDN}/oauth/client/redirect",
-        "https://${WL_APM_VIP}/oauth/client/redirect"
-      ],
-      "webOrigins": [
-        "https://${WL_WEBTOP_FQDN}",
-        "https://${WL_APM_VIP}"
-      ],
       "attributes": {
-        "post.logout.redirect.uri": "+"
+        "access.token.lifespan": "60"
       },
       "protocolMappers": [
         {
-          "name": "username-as-sub-and-preferred-username",
+          "name": "username",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-usermodel-property-mapper",
           "consentRequired": false,
@@ -108,7 +113,7 @@
     }
   ],
 
-  "_comment_ldap": "Read-only federation of the SAME directory APM authenticates against, so the OTP is bound to the same identity and Keycloak never becomes a second password store. editMode READ_ONLY is load-bearing: Keycloak must not be able to write to a customer's AD.",
+  "_comment_ldap": "Read-only federation of the SAME directory the BIG-IP authenticates against, so the OTP is bound to the same identity and Keycloak never becomes a second password store. editMode READ_ONLY is load-bearing: Keycloak must not be able to write to a customer's AD.",
   "components": {
     "org.keycloak.storage.UserStorageProvider": [
       {

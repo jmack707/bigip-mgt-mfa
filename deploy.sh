@@ -123,8 +123,14 @@ if [ "$DO_STACK" = 1 ]; then
   [ "$ok" = 1 ] || die "Keycloak did not publish the ${WL_KEYCLOAK_REALM} realm — 'docker compose logs keycloak'"
   echo "  issuer: $(curl -sk --resolve "${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}:${WL_HOST_IP}" -m5 "$DISC" | jq -r .issuer)"
 
+  say "reconciling the realm"
+  # --import-realm only applies on first creation, so without this a redeploy would run
+  # against the realm as it was and template edits would appear to do nothing.
+  scripts/kc-reconcile.sh
+
   say "stack ready"
   echo "  Keycloak admin console: ${KC}/admin/  (${WL_KEYCLOAK_ADMIN})"
+  echo "  Users enrol an authenticator at: ${KC}/realms/${WL_KEYCLOAK_REALM}/account"
   echo "  Next: ./deploy.sh --bigip"
 fi
 
