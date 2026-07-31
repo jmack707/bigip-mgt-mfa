@@ -245,30 +245,44 @@ add "$B/mgmt/tm/apm/sso/form-based" "$(jq -n --arg n "${P}-tmui-sso" \
   '{name:$n,partition:"Common",startUri:"/tmui/login.jsp*",formAction:"/tmui/logmein.html",formUsername:"username",formPassword:"passwd",formMethod:"post",successMatchType:"url",successMatchValue:"/"}')"
 add "$B/mgmt/tm/apm/resource/webtop" "$(jq -n --arg n "${P}-webtop" --arg cg "/$PART/${P}_webtop_cg" '{name:$n,partition:"Common",customizationGroup:$cg,webtopType:"full"}')"
 mk_portal(){ # mk_portal <name> <facade-ip> <acl-order> <caption>
-  # NOT delete-then-create. `caption` is not a settable property of this object at all -- it
-  # is refused on PATCH, ignored on POST, and absent from the tmsh property list; the webtop
-  # tile label lives somewhere in the resource customization group that I have not pinned
-  # down. Recreating therefore does not fix the caption, and it WOULD destroy one set by hand
-  # in the GUI, which is currently the only way to set it. So the create stays 409-tolerant
-  # and a hand-set caption survives every redeploy.
+  # `items` is an ARRAY of objects each carrying a `name`, not an object keyed by item name.
+  # That is the shape F5's own Postman collection uses, and it matters: in the array form the
+  # nested `sso` is accepted and stored by a plain REST create, so no tmsh call is needed for
+  # it. In the object form it was silently dropped, which is what sent me to tmsh originally.
+  #
+  # `caption` is passed but is NOT settable on this object -- it is ignored on create,
+  # refused on PATCH, and absent from the tmsh property list. F5's collection does not set one
+  # either; their tile labels come from webtop-section. It is left here so the intent is
+  # visible rather than looking like an omission.
+  #
+  # The create stays 409-tolerant. Recreating would not fix the caption and WOULD destroy one
+  # set by hand in the GUI, which is currently the only way to set it.
   add "$B/mgmt/tm/apm/resource/portal-access" "$(jq -n --arg n "$1" --arg h "$2" --argjson o "$3" --arg c "$4" --arg sso "/$PART/${P}-tmui-sso" \
     '{name:$n,partition:"Common",aclOrder:$o,publishOnWebtop:"true",caption:$c,
       applicationUri:("https://"+$h+"/tmui/login.jsp"),
-      items:{item1:{host:$h,paths:"/*",scheme:"https",port:443,sso:$sso}}}')"
-  # Two SEPARATE tmsh commands, deliberately. Combining them fails: the caption contains
-  # parentheses ("BIG-IP A (TMUI)") which break the parse of the whole line, and because
-  # bash_cmd never inspected an exit code the failure was invisible -- the headers silently
-  # went unset while the build reported success.
-  # sso AND headers in ONE items-modify: an items-modify replaces the item's block, so
-  # setting one of them alone wipes the other. destipaddr steers the portal engine to the
-  # facade; referer satisfies TMUI login.jsp CSRF.
-  # headers takes a brace block containing UNNAMED entries -- `headers replace-all-with {...}`
-  # and `headers add {...}` are both rejected with
+      items:[{name:"item1",host:$h,paths:"/*",scheme:"https",port:443,sso:$sso}]}')"
+
+  # headers is the ONE thing REST will not take, in any shape tried -- the array form is
+  # rejected with `Unexpected identifier "destipaddr" "{" is required`. So exactly one tmsh
+  # call survives, and it sets only headers. tmsh wants a brace block of UNNAMED entries;
+  # `headers replace-all-with {...}` and `headers add {...}` are both refused with
   #   Syntax Error: "headers" you must specify either "none" or "{"
-  # sso and headers go in the SAME items-modify: an items-modify replaces the item block, so
-  # setting one alone silently drops the other.
-  bash_cmd "tmsh modify apm resource portal-access $1 items modify { item1 { sso /$PART/${P}-tmui-sso headers { { name destipaddr value $2 } { name referer value https://$2:443 } } } }"
+  #
+  # destipaddr steers the portal engine to the facade; referer satisfies TMUI login.jsp CSRF.
+  # Do NOT fold anything else into this command: an items-modify replaces the item block, and
+  # combining it with the caption breaks the parse because of the parentheses in the value.
+  bash_cmd "tmsh modify apm resource portal-access $1 items modify { item1 { headers { { name destipaddr value $2 } { name referer value https://$2:443 } } } }"
+
+  # Read back from the /items SUB-COLLECTION. The parent object reports these nested fields as
+  # null even when they are set correctly, which is a very convincing way to diagnose a bug
+  # that does not exist.
+  local got
+  got=$(curl "${A[@]}" -m8 "$B/mgmt/tm/apm/resource/portal-access/~${PART}~$1/items" \
+        | jq -r '.items[0] | "sso=\(.sso // "MISSING") headers=\([.headers[]?]|length)"')
+  echo "  verify $1 -> $got"
+  case "$got" in *"sso=MISSING"*|*"headers=0"*) echo "    ^^ portal item is incomplete" >&2 ;; esac
 }
+
 mk_portal "${P}-bigip-a-tmui" "$SHADOW_A" 1 "BIG-IP A (TMUI)"
 mk_portal "${P}-bigip-b-tmui" "$SHADOW_B" 2 "BIG-IP B (TMUI)"
 add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-referer-strip" --arg b 'when HTTP_REQUEST {
