@@ -60,6 +60,13 @@ MEM=$(ldapsearch -x -LLL -H "$LDAP_URI" -D "${MFA_BIND_DN}" -w "${MFA_BIND_PW}" 
 #
 # Note the data plane is independent: TMM keeps serving the webtop perfectly while restjavad
 # is down, so "REST unreachable" is not the same as "the demo is down". Check the VIP.
+#
+# KNOWN LIMITATION (issue #4): this probes ONCE. If restjavad is answering here and wedges
+# part-way through the run -- which it does, under exactly the volume of REST calls a full
+# validation makes -- every later check still reports as a configuration failure, which is
+# the confusion this gate exists to prevent. If results look wrong, confirm with
+# `f5.sh status` and scripts/test-mfa-matrix.sh, which goes through the data plane and is
+# unaffected. The fix is to re-probe per section rather than once at the top.
 A=(-sk -u "${BIGIP_USER}:${BIGIP_PASS:-}")
 # BIGIP_B_MGMT is optional -- a single-unit deployment is supported, so every per-unit check
 # iterates whatever is actually configured rather than assuming a pair.
