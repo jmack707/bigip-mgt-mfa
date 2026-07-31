@@ -5,24 +5,24 @@
 #
 # Applied AFTER ldap/memberof-overlay.ldif, or memberOf is never populated and everyone
 # falls through to the read-only default role.
-dn: uid=alice.admin,${WL_USER_SEARCH_BASE}
+dn: uid=alice.admin,${MFA_USER_SEARCH_BASE}
 objectClass: inetOrgPerson
 uid: alice.admin
 cn: Alice Admin
 sn: Admin
-mail: alice.admin@${WL_DOMAIN}
-userPassword: ${WL_TEST_USER_PW}
+mail: alice.admin@${MFA_DOMAIN}
+userPassword: ${MFA_TEST_USER_PW}
 
-dn: uid=bob.user,${WL_USER_SEARCH_BASE}
+dn: uid=bob.user,${MFA_USER_SEARCH_BASE}
 objectClass: inetOrgPerson
 uid: bob.user
 cn: Bob User
 sn: User
-mail: bob.user@${WL_DOMAIN}
-userPassword: ${WL_TEST_USER_PW}
+mail: bob.user@${MFA_DOMAIN}
+userPassword: ${MFA_TEST_USER_PW}
 
 # groupOfNames requires at least one member at creation, so alice is seeded inline.
-dn: ${WL_ADMIN_GROUP_DN}
+dn: ${MFA_ADMIN_GROUP_DN}
 objectClass: groupOfNames
 cn: bigip-admins
-member: uid=alice.admin,${WL_USER_SEARCH_BASE}
+member: uid=alice.admin,${MFA_USER_SEARCH_BASE}

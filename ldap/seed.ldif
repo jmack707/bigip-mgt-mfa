@@ -1,6 +1,6 @@
 # Directory skeleton. Unlike Warden there is no privileged subtree here: users log in with
 # their own credential end to end, so one identity subtree is all this demo needs.
-dn: ${WL_USER_SEARCH_BASE}
+dn: ${MFA_USER_SEARCH_BASE}
 objectClass: organizationalUnit
 ou: people
 
@@ -12,8 +12,8 @@ dn: ou=svc,${BASE_DN}
 objectClass: organizationalUnit
 ou: svc
 
-dn: ${WL_BIND_DN}
+dn: ${MFA_BIND_DN}
 objectClass: inetOrgPerson
 cn: bigip-bind
 sn: service
-userPassword: ${WL_BIND_PW}
+userPassword: ${MFA_BIND_PW}

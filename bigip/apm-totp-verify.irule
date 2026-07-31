@@ -1,0 +1,97 @@
+# RFC 6238 TOTP verification, computed on the BIG-IP itself.
+#
+# The access policy fires an 'iRule Event' agent with id `totp_verify`. This reads the code
+# the user typed on the logon page, looks up that user's base32 seed, computes the expected
+# code for the current 30-second step, and sets session.custom.totp.verified to 1 on a match.
+#
+# There is no network call here. That is the point: the earlier Keycloak design had to reach
+# an external service mid-policy, and a sideband connect that never returned took the whole
+# policy down with it. This is local arithmetic and cannot hang.
+#
+# Both factors are bound to one identity by construction: the same username from the same
+# logon submission selects the seed here and was bound to the password by the LDAP Auth step
+# immediately before. There is no way to pair one user's password with another's token.
+#
+# The seed lives in the bigip_mgt_mfa_totp_dg data group rather than in the directory. That is
+# deliberate and mirrors how a real MFA product works: the directory owns identity, the MFA
+# verifier owns token secrets. It also avoids putting a credential-equivalent secret on the
+# user's directory entry, where anything that can read the entry could mint valid codes.
+#
+# A +/-1 step window is accepted, which is the RFC's own recommendation: it absorbs clock
+# skew between the phone and the BIG-IP without meaningfully widening the attack surface.
+# Keep the BIG-IP's NTP honest or this is the first thing that breaks.
+#
+# The step size is rendered in from MFA_TOTP_PERIOD at upload time. Note that a longer period
+# widens the acceptance window proportionally: at 60s, +/-1 step means a code stays valid for
+# up to three minutes. That is a deliberate usability trade, not an oversight.
+#
+# ASCII only. The TMOS iRule compiler rejects non-ASCII characters and reports it as
+# "braces are required around the expression" pointing at the `when` line, which sends you
+# hunting in entirely the wrong place.
+#-----------------------------------------------------------------------------
+when ACCESS_POLICY_AGENT_EVENT {
+    if { [ACCESS::policy agent_id] eq "totp_verify" } {
+        ACCESS::session data set session.custom.totp.verified 0
+
+        set user [ACCESS::session data get session.logon.last.username]
+        set code [ACCESS::session data get session.logon.last.otp]
+        if { $user equals "" } { return }
+        if { $code equals "" } { return }
+
+        # The seed for this user. No entry means no enrolled token, which is a denial --
+        # never a pass. An un-enrolled account must not skip the second factor.
+        set b32 [string toupper [class lookup $user bigip_mgt_mfa_totp_dg]]
+        if { $b32 equals "" } {
+            ACCESS::session data set session.custom.totp.err "no-token"
+            return
+        }
+
+        # --- base32 decode (RFC 4648) into a byte string ---
+        set alpha "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+        # Build the bit string 5 bits at a time, then repack into bytes. Explicit and
+        # readable beats clever bit-twiddling in Tcl.
+        set bitstr ""
+        foreach ch [split $b32 ""] {
+            if { $ch equals "=" } { continue }
+            set idx [string first $ch $alpha]
+            if { $idx < 0 } { continue }
+            binary scan [binary format c $idx] B8 b
+            append bitstr [string range $b 3 7]
+        }
+        set key ""
+        set nbytes [expr {[string length $bitstr] / 8}]
+        for { set i 0 } { $i < $nbytes } { incr i } {
+            set byte [string range $bitstr [expr {$i * 8}] [expr {$i * 8 + 7}]]
+            append key [binary format B8 $byte]
+        }
+        if { [string length $key] == 0 } {
+            ACCESS::session data set session.custom.totp.err "bad-seed"
+            return
+        }
+
+        # --- compare against this step and its immediate neighbours ---
+        set step [expr {[clock seconds] / ${MFA_TOTP_PERIOD}}]
+        set skew ${MFA_TOTP_SKEW}
+        set ok 0
+        for { set d [expr {0 - $skew}] } { $d <= $skew } { incr d } {
+            set ctr [expr {$step + $d}]
+            set msg [binary format W $ctr]
+            set mac [CRYPTO::sign -alg hmac-sha1 -key $key $msg]
+            binary scan $mac c* bytes
+            set off [expr {[lindex $bytes 19] & 0x0f}]
+            set p0 [expr {[lindex $bytes $off] & 0x7f}]
+            set p1 [expr {[lindex $bytes [expr {$off + 1}]] & 0xff}]
+            set p2 [expr {[lindex $bytes [expr {$off + 2}]] & 0xff}]
+            set p3 [expr {[lindex $bytes [expr {$off + 3}]] & 0xff}]
+            set bin [expr {($p0 << 24) | ($p1 << 16) | ($p2 << 8) | $p3}]
+            set want [format %06d [expr {$bin % 1000000}]]
+            if { $want equals $code } { set ok 1 }
+        }
+
+        if { $ok == 1 } {
+            ACCESS::session data set session.custom.totp.verified 1
+        } else {
+            ACCESS::session data set session.custom.totp.err "mismatch"
+        }
+    }
+}

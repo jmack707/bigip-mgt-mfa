@@ -14,12 +14,12 @@ with a directory conversation — a bind account, a search base, a CA export, a 
 before anything can be demonstrated at all.
 
 ## Decision
-warden-lite ships an OpenLDAP container and seeds it with two principals whose only
-difference is membership of the admin group. That is the default (`WL_DIRECTORY_MODE=bundled`)
+bigip-mgt-mfa ships an OpenLDAP container and seeds it with two principals whose only
+difference is membership of the admin group. That is the default (`MFA_DIRECTORY_MODE=bundled`)
 and it requires no external anything.
 
-`WL_DIRECTORY_MODE=external` switches every consumer to a directory you supply. The OpenLDAP
-container does not start, and warden-lite creates nothing and writes nothing: APM binds to
+`MFA_DIRECTORY_MODE=external` switches every consumer to a directory you supply. The OpenLDAP
+container does not start, and bigip-mgt-mfa creates nothing and writes nothing: APM binds to
 check a password, the BIG-IPs read `memberOf`, and Keycloak federates `READ_ONLY`. Those three
 read-only interactions are the entire contact surface.
 
@@ -42,5 +42,5 @@ Two consequences worth knowing:
   `deploy.sh` enforces the order and `scripts/validate.sh` asserts the result.
 - **Schema differences are configuration, not code.** Active Directory logs in as
   `sAMAccountName` rather than `uid` and needs a different Keycloak federation vendor and UUID
-  attribute. `scripts/lib/directory.sh` derives all of these from `WL_LDAP_SCHEMA`, so the
+  attribute. `scripts/lib/directory.sh` derives all of these from `MFA_LDAP_SCHEMA`, so the
   difference stays in one place. See [../directory.md](../directory.md).

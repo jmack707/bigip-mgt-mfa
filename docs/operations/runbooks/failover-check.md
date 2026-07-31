@@ -50,11 +50,11 @@ be green first. This runbook is the expensive version: it proves the *data plane
    of this runbook proves nothing:
 
    ```bash
-   # on unit A, from tmsh — <apm-vip> is WL_APM_VIP
+   # on unit A, from tmsh — <apm-vip> is MFA_APM_VIP
    tmsh list ltm virtual-address <apm-vip> traffic-group
    ```
 
-   Expected: a floating group such as `traffic-group-1`, matching `WL_APM_TRAFFIC_GROUP`. No
+   Expected: a floating group such as `traffic-group-1`, matching `MFA_APM_TRAFFIC_GROUP`. No
    script in the repo reads that variable — `bigip/apm-build.sh` creates the webtop virtual
    server without an explicit traffic group, so the VIP inherits the device default. If this
    reports `traffic-group-local-only`, set it and sync before continuing:
@@ -82,8 +82,8 @@ be green first. This runbook is the expensive version: it proves the *data plane
 5. Confirm the VIP answers from the new active unit:
 
    ```bash
-   curl -sk -o /dev/null -w '%{http_code}\n' --resolve "${WL_WEBTOP_FQDN}:443:${WL_APM_VIP}" \
-     "https://${WL_WEBTOP_FQDN}/"
+   curl -sk -o /dev/null -w '%{http_code}\n' --resolve "${MFA_WEBTOP_FQDN}:443:${MFA_APM_VIP}" \
+     "https://${MFA_WEBTOP_FQDN}/"
    ```
 
    Expected: `200` or `302`. `000` means the VIP did not move — go back to step 2.
@@ -98,7 +98,7 @@ scripts/demo-login.sh bob.user
 ./scripts/validate.sh; echo "failed checks: $?"
 ```
 
-Expected: both users complete password → LDAP → Keycloak TOTP → webtop with both TMUI resources
+Expected: both users complete password → LDAP → the directory TOTP → webtop with both TMUI resources
 on the session, and `validate.sh` exits `0`.
 
 Then assert the authorization outcome **on the newly-active unit specifically** — this is the
@@ -109,7 +109,7 @@ the Guest role cannot use iControl REST and an HTTP status code would misreport 
 ```bash
 NEW_ACTIVE="${BIGIP_B_MGMT}"   # whichever unit step 4 promoted
 for user in alice.admin bob.user; do
-  curl -sk -o /dev/null -m10 -u "${user}:${WL_TEST_USER_PW}" "https://${NEW_ACTIVE}/mgmt/tm/sys/version"
+  curl -sk -o /dev/null -m10 -u "${user}:${MFA_TEST_USER_PW}" "https://${NEW_ACTIVE}/mgmt/tm/sys/version"
   sleep 3
   printf '%s -> ' "$user"
   curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" -X POST -H 'Content-Type: application/json' \
@@ -162,7 +162,7 @@ script is idempotent and per-unit. Confirm the pair is back where you want it:
   `checkRolesGroup` on the failing unit — disabled, TMOS ignores every remote-role rule and every
   remote user gets the default role.
 - The pair will not leave `Forced Offline`, or sync-status stays `Changes Pending` after a sync:
-  that is HA, not warden-lite. Take it to the lab operator with the output of
+  that is HA, not bigip-mgt-mfa. Take it to the lab operator with the output of
   `tmsh show cm sync-status` and `tmsh show sys failover` from both units.
 - Anything in the login chain that fails identically on both units is not a failover problem —
   start from [../troubleshooting.md](../troubleshooting.md).
