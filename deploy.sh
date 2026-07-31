@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# warden-lite deployer. Two halves, deliberately separable:
+# bigip-mgt-mfa deployer. Two halves, deliberately separable:
 #
 #   ./deploy.sh --stack    Keycloak + the directory, in Docker. Touches NO BIG-IP. Prove
 #                          this half works before pointing anything at your appliances.
@@ -8,7 +8,7 @@
 #                          to the peer).
 #   ./deploy.sh            both, in that order.
 #
-# Re-running is safe: certs are reused unless WL_REGEN_CA=1, LDAP seeding tolerates
+# Re-running is safe: certs are reused unless MFA_REGEN_CA=1, LDAP seeding tolerates
 # "already exists", and the APM build tears down and rebuilds only the mutable policy graph.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -40,14 +40,14 @@ docker compose version >/dev/null 2>&1 || die "needs the docker compose V2 plugi
 # ── the Docker half ─────────────────────────────────────────────────────────
 if [ "$DO_STACK" = 1 ]; then
   say "directory model"
-  wl_directory_summary
+  mfa_directory_summary
 
-  say "certificates (CA, Keycloak, webtop VIP$(wl_is_bundled && echo ", LDAPS"))"
+  say "certificates (CA, Keycloak, webtop VIP$(mfa_is_bundled && echo ", LDAPS"))"
   scripts/gen-certs.sh
 
   say "rendering the demo DNS zone"
   envsubst < dns/Corefile.tmpl > dns/Corefile
-  echo "  ${WL_KEYCLOAK_FQDN} -> ${WL_HOST_IP};  ${WL_WEBTOP_FQDN} -> ${WL_APM_VIP}"
+  echo "  ${MFA_KEYCLOAK_FQDN} -> ${MFA_HOST_IP};  ${MFA_WEBTOP_FQDN} -> ${MFA_APM_VIP}"
 
   say "rendering the Keycloak realm"
   mkdir -p keycloak/import
@@ -55,14 +55,14 @@ if [ "$DO_STACK" = 1 ]; then
   # protect). jq then strips every "_comment*" key: the template carries its rationale inline
   # where the config is, but Keycloak's importer rejects unknown fields outright rather than
   # ignoring them, so the comments must not reach it.
-  envsubst < keycloak/warden-lite-realm.json.tmpl \
+  envsubst < keycloak/bigip-mgt-mfa-realm.json.tmpl \
     | jq 'walk(if type == "object" then with_entries(select(.key | startswith("_comment") | not)) else . end)' \
-    > keycloak/import/warden-lite-realm.json \
+    > keycloak/import/bigip-mgt-mfa-realm.json \
     || die "rendered realm is not valid JSON — check for unset variables in .env"
-  echo "  keycloak/import/warden-lite-realm.json"
+  echo "  keycloak/import/bigip-mgt-mfa-realm.json"
 
   say "starting containers"
-  if wl_is_bundled; then
+  if mfa_is_bundled; then
     docker compose --profile bundled up -d
   else
     docker compose up -d
@@ -76,7 +76,7 @@ if [ "$DO_STACK" = 1 ]; then
   # in the logs connects to a certificate.
   if [ -f certs/.reissued ]; then
     say "certificates were re-issued — restarting the services that present them"
-    if wl_is_bundled; then
+    if mfa_is_bundled; then
       docker compose --profile bundled restart keycloak openldap
     else
       docker compose restart keycloak
@@ -84,7 +84,7 @@ if [ "$DO_STACK" = 1 ]; then
     rm -f certs/.reissued
   fi
 
-  if wl_is_bundled; then
+  if mfa_is_bundled; then
     say "seeding the directory"
     # The overlay MUST land before the group: memberOf is only computed for changes made
     # after it is active, so seeding in the other order silently yields no admins.
@@ -100,7 +100,7 @@ if [ "$DO_STACK" = 1 ]; then
 
     ldap_add(){ # ldap_add <file>
       envsubst < "$1" | docker exec -i openldap \
-        ldapadd -x -D "cn=admin,${BASE_DN}" -w "${WL_LDAP_ADMIN_PW}" -c >/dev/null 2>&1 \
+        ldapadd -x -D "cn=admin,${BASE_DN}" -w "${MFA_LDAP_ADMIN_PW}" -c >/dev/null 2>&1 \
         && echo "  ${1##*/} applied" || echo "  ${1##*/} applied (entries already present)"
     }
     ldap_add ldap/seed.ldif
@@ -111,17 +111,17 @@ if [ "$DO_STACK" = 1 ]; then
   fi
 
   say "waiting for Keycloak"
-  KC="https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}"
-  DISC="${KC}/realms/${WL_KEYCLOAK_REALM}/.well-known/openid-configuration"
+  KC="https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}"
+  DISC="${KC}/realms/${MFA_KEYCLOAK_REALM}/.well-known/openid-configuration"
   ok=0
   for i in $(seq 1 60); do
-    if curl -sk --resolve "${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}:${WL_HOST_IP}" -m5 "$DISC" | jq -e .issuer >/dev/null 2>&1; then
+    if curl -sk --resolve "${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}:${MFA_HOST_IP}" -m5 "$DISC" | jq -e .issuer >/dev/null 2>&1; then
       ok=1; break
     fi
     sleep 5
   done
-  [ "$ok" = 1 ] || die "Keycloak did not publish the ${WL_KEYCLOAK_REALM} realm — 'docker compose logs keycloak'"
-  echo "  issuer: $(curl -sk --resolve "${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}:${WL_HOST_IP}" -m5 "$DISC" | jq -r .issuer)"
+  [ "$ok" = 1 ] || die "Keycloak did not publish the ${MFA_KEYCLOAK_REALM} realm — 'docker compose logs keycloak'"
+  echo "  issuer: $(curl -sk --resolve "${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}:${MFA_HOST_IP}" -m5 "$DISC" | jq -r .issuer)"
 
   say "reconciling the realm"
   # --import-realm only applies on first creation, so without this a redeploy would run
@@ -129,8 +129,8 @@ if [ "$DO_STACK" = 1 ]; then
   scripts/kc-reconcile.sh
 
   say "stack ready"
-  echo "  Keycloak admin console: ${KC}/admin/  (${WL_KEYCLOAK_ADMIN})"
-  echo "  Users enrol an authenticator at: ${KC}/realms/${WL_KEYCLOAK_REALM}/account"
+  echo "  Keycloak admin console: ${KC}/admin/  (${MFA_KEYCLOAK_ADMIN})"
+  echo "  Users enrol an authenticator at: ${KC}/realms/${MFA_KEYCLOAK_REALM}/account"
   echo "  Next: ./deploy.sh --bigip"
 fi
 
@@ -155,7 +155,7 @@ if [ "$DO_BIGIP" = 1 ]; then
   # Resolve the device group here rather than inside a remote shell: the name has to be
   # substituted as a literal, and nesting quotes through /util/bash is how you end up asking
   # TMOS to sync to a group called "{".
-  DG="${WL_DEVICE_GROUP:-}"
+  DG="${MFA_DEVICE_GROUP:-}"
   if [ -z "$DG" ]; then
     DG=$(curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" "https://${BIGIP_A_MGMT}/mgmt/tm/cm/device-group" \
          | jq -r '[.items[]? | select(.type=="sync-failover") | .name] | first // empty')
@@ -171,6 +171,6 @@ if [ "$DO_BIGIP" = 1 ]; then
   fi
 
   say "done"
-  echo "  Browse to https://${WL_WEBTOP_FQDN}/  (VIP ${WL_APM_VIP})"
+  echo "  Browse to https://${MFA_WEBTOP_FQDN}/  (VIP ${MFA_APM_VIP})"
   echo "  Verify with: scripts/validate.sh"
 fi

@@ -1,6 +1,6 @@
 {
   "_comment": "Rendered by deploy.sh (envsubst, then jq strips every _comment key) to keycloak/import/ and imported at container start. Do not edit the rendered copy — it is gitignored and overwritten on every deploy.",
-  "realm": "${WL_KEYCLOAK_REALM}",
+  "realm": "${MFA_KEYCLOAK_REALM}",
   "enabled": true,
   "sslRequired": "external",
   "registrationAllowed": false,
@@ -41,7 +41,7 @@
   "_comment_direct_grant": "This is how the BIG-IP verifies a login. APM posts username + password + otp to the token endpoint in ONE call, and Keycloak validates all three against the same identity atomically — so a valid password paired with somebody else's authenticator is rejected. OTP is REQUIRED, not CONDITIONAL: the stock direct-grant flow only demands an OTP from users who happen to have one configured, which would let an un-enrolled account through on a password alone.",
   "authenticationFlows": [
     {
-      "alias": "warden-lite direct grant",
+      "alias": "bigip-mgt-mfa direct grant",
       "description": "username + password + OTP validated together, for the BIG-IP APM logon page",
       "providerId": "basic-flow",
       "topLevel": true,
@@ -74,18 +74,18 @@
       ]
     }
   ],
-  "directGrantFlow": "warden-lite direct grant",
+  "directGrantFlow": "bigip-mgt-mfa direct grant",
 
   "clients": [
     {
-      "clientId": "${WL_OIDC_CLIENT_ID}",
+      "clientId": "${MFA_OIDC_CLIENT_ID}",
       "name": "BIG-IP APM logon page",
       "description": "Confidential client the BIG-IP uses to verify username+password+OTP in a single direct-grant call. No browser redirect is involved.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
       "bearerOnly": false,
-      "secret": "${WL_OIDC_CLIENT_SECRET}",
+      "secret": "${MFA_OIDC_CLIENT_SECRET}",
       "_comment_flags": "standardFlow is OFF: APM is no longer an OIDC relying party and never redirects a browser here, so an authorization-code flow would be unused attack surface. directAccessGrants is the only flow this client needs.",
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
@@ -117,7 +117,7 @@
   "components": {
     "org.keycloak.storage.UserStorageProvider": [
       {
-        "name": "warden-lite-directory",
+        "name": "bigip-mgt-mfa-directory",
         "providerId": "ldap",
         "subComponents": {
           "org.keycloak.storage.ldap.mappers.LDAPStorageMapper": [
@@ -125,7 +125,7 @@
               "name": "username",
               "providerId": "user-attribute-ldap-mapper",
               "config": {
-                "ldap.attribute": ["${WL_LOGIN_ATTR}"],
+                "ldap.attribute": ["${MFA_LOGIN_ATTR}"],
                 "user.model.attribute": ["username"],
                 "read.only": ["true"],
                 "always.read.value.from.ldap": ["false"],
@@ -169,19 +169,19 @@
         },
         "config": {
           "enabled": ["true"],
-          "vendor": ["${WL_KC_LDAP_VENDOR}"],
-          "connectionUrl": ["ldap://${WL_KC_LDAP_HOST}:${WL_LDAP_PORT}"],
-          "usersDn": ["${WL_USER_SEARCH_BASE}"],
-          "bindDn": ["${WL_BIND_DN}"],
-          "bindCredential": ["${WL_BIND_PW}"],
+          "vendor": ["${MFA_KC_LDAP_VENDOR}"],
+          "connectionUrl": ["ldap://${MFA_KC_LDAP_HOST}:${MFA_LDAP_PORT}"],
+          "usersDn": ["${MFA_USER_SEARCH_BASE}"],
+          "bindDn": ["${MFA_BIND_DN}"],
+          "bindCredential": ["${MFA_BIND_PW}"],
           "authType": ["simple"],
           "editMode": ["READ_ONLY"],
           "importEnabled": ["true"],
           "syncRegistrations": ["false"],
-          "usernameLDAPAttribute": ["${WL_LOGIN_ATTR}"],
-          "rdnLDAPAttribute": ["${WL_LOGIN_ATTR}"],
-          "uuidLDAPAttribute": ["${WL_KC_LDAP_UUID_ATTR}"],
-          "userObjectClasses": ["${WL_KC_LDAP_USER_CLASSES}"],
+          "usernameLDAPAttribute": ["${MFA_LOGIN_ATTR}"],
+          "rdnLDAPAttribute": ["${MFA_LOGIN_ATTR}"],
+          "uuidLDAPAttribute": ["${MFA_KC_LDAP_UUID_ATTR}"],
+          "userObjectClasses": ["${MFA_KC_LDAP_USER_CLASSES}"],
           "searchScope": ["2"],
           "pagination": ["true"],
           "trustEmail": ["false"],

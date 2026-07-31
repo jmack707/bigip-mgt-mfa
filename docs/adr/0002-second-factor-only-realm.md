@@ -11,7 +11,7 @@ for the same password a second time, verified against the same directory, adding
 assurance and a great deal of irritation.
 
 ## Decision
-The realm ships a custom top-level browser flow, `warden-lite second factor`, with exactly
+The realm ships a custom top-level browser flow, `bigip-mgt-mfa second factor`, with exactly
 two executions, both REQUIRED:
 
 1. `auth-username-form` — establishes which identity is being stepped up.

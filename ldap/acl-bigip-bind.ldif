@@ -16,5 +16,5 @@ changetype: modify
 replace: olcAccess
 olcAccess: {0}to * by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth manage by * break
 olcAccess: {1}to attrs=userPassword,shadowLastChange by self write by dn="cn=admin,${BASE_DN}" write by anonymous auth by * none
-olcAccess: {2}to dn.subtree="${BASE_DN}" by dn.exact="${WL_BIND_DN}" read by self read by dn="cn=admin,${BASE_DN}" write by * none
+olcAccess: {2}to dn.subtree="${BASE_DN}" by dn.exact="${MFA_BIND_DN}" read by self read by dn="cn=admin,${BASE_DN}" write by * none
 olcAccess: {3}to * by self read by dn="cn=admin,${BASE_DN}" write by * none

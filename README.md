@@ -1,11 +1,11 @@
-# warden-lite — MFA webtop SSO into a BIG-IP HA pair
+# bigip-mgt-mfa — MFA webtop SSO into a BIG-IP HA pair
 
 A redeployable demo: a customer logs into a BIG-IP APM webtop with a password and a one-time
 code, and lands in the management UI of both BIG-IPs in an HA pair — signed in as themselves,
 with their own role.
 
 ## What this is
-warden-lite is the short path to a story that usually takes a week of clicking to assemble:
+bigip-mgt-mfa is the short path to a story that usually takes a week of clicking to assemble:
 
 - **APM** is the front door — logon page, directory authentication, webtop, and SSO.
 - **Keycloak** is the second factor, and only the second factor.
@@ -16,7 +16,7 @@ Everything is declared in this repo. `docker compose` brings the identity side; 
 builds the access tier on the pair. It runs the same way on UDF, a Proxmox lab, or a laptop.
 
 It is the smaller sibling of [Warden](https://github.com/jmack707/warden), which solves the
-harder problem of privileged access with a vault and client certificates. warden-lite drops
+harder problem of privileged access with a vault and client certificates. bigip-mgt-mfa drops
 both: no vault, no PKI enrolment, no rotating credentials. Users sign in as themselves.
 
 ## Topology
@@ -56,7 +56,7 @@ Because APM performs the first factor itself, the password is in the session and
 single-signed-on to TMUI. A conventional OIDC front door — where Keycloak owns the entire
 login and APM is a plain relying party — never sees a password, so it has nothing to sign in
 with and needs a vault or a shared admin account to bridge the gap. That is precisely the
-problem [Warden](https://github.com/jmack707/warden) exists to solve. warden-lite avoids it
+problem [Warden](https://github.com/jmack707/warden) exists to solve. bigip-mgt-mfa avoids it
 by reordering the factors.
 
 The cost is that Keycloak is configured as a second-factor oracle rather than a general
@@ -76,13 +76,13 @@ You bring a licensed BIG-IP HA pair with LTM and APM provisioned, and a Linux ho
 Docker that the BIG-IPs can reach.
 
 ```bash
-cp .env.example .env      # fill in WL_HOST_IP, the BIG-IP addresses, WL_APM_VIP, passwords
+cp .env.example .env      # fill in MFA_HOST_IP, the BIG-IP addresses, MFA_APM_VIP, passwords
 ./deploy.sh --stack       # Keycloak + directory + DNS. Touches no BIG-IP — prove it first.
 ./deploy.sh --bigip       # trust anchors, remote-role on both units, APM policy on the pair
 ./scripts/validate.sh     # 26 assertions, end to end
 ```
 
-Then browse to `https://<WL_WEBTOP_FQDN>/` and sign in as `alice.admin`. On first login
+Then browse to `https://<MFA_WEBTOP_FQDN>/` and sign in as `alice.admin`. On first login
 Keycloak walks you through enrolling an authenticator app. Sign in again as `bob.user` to see
 the same webtop resolve to a read-only TMUI.
 
@@ -104,7 +104,7 @@ one-time code, and the return to the webtop, then confirms both BIG-IP resources
 session. It needs `oathtool`.
 
 ## Bring your own directory
-Set `WL_DIRECTORY_MODE=external` and point warden-lite at your AD, FreeIPA, or LDAP. It
+Set `MFA_DIRECTORY_MODE=external` and point bigip-mgt-mfa at your AD, FreeIPA, or LDAP. It
 creates nothing and writes nothing: APM binds to check a password, the BIG-IPs read
 `memberOf`, and Keycloak federates read-only. See [docs/directory.md](docs/directory.md).
 

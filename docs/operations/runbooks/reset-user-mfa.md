@@ -20,11 +20,11 @@ stops the login at the step-up and nothing else. Resetting it does not touch the
 directory password or their group membership.
 
 ## Prerequisites
-- The Keycloak master-realm admin credentials from `.env` (`WL_KEYCLOAK_ADMIN`,
-  `WL_KEYCLOAK_ADMIN_PW`) and reachability to
-  `https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}`. The console is at `/admin/`.
+- The Keycloak master-realm admin credentials from `.env` (`MFA_KEYCLOAK_ADMIN`,
+  `MFA_KEYCLOAK_ADMIN_PW`) and reachability to
+  `https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}`. The console is at `/admin/`.
 - The user's username exactly as the directory holds it — `uid` in bundled mode,
-  `sAMAccountName` when `WL_LDAP_SCHEMA=ad`. Keycloak federates the directory read-only, so the
+  `sAMAccountName` when `MFA_LDAP_SCHEMA=ad`. Keycloak federates the directory read-only, so the
   username is the directory's, not one Keycloak invented.
 - For the REST path: `curl` and `jq` on whatever host you run it from.
 - Shell access on the Docker host if the user in question is being tested with
@@ -34,10 +34,10 @@ directory password or their group membership.
 
 ## Procedure
 ### Admin console
-1. Browse to `https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}/admin/` and sign in as
-   `WL_KEYCLOAK_ADMIN`.
-2. Switch the realm selector from `master` to **`warden-lite`** (the value of
-   `WL_KEYCLOAK_REALM`). Deleting a credential in `master` does nothing for demo users.
+1. Browse to `https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}/admin/` and sign in as
+   `MFA_KEYCLOAK_ADMIN`.
+2. Switch the realm selector from `master` to **`bigip-mgt-mfa`** (the value of
+   `MFA_KEYCLOAK_REALM`). Deleting a credential in `master` does nothing for demo users.
 3. **Users** → search the username → open it → **Credentials**.
 4. Delete the row of type **`otp`**. Leave everything else alone; the password lives in the
    directory and is not shown here.
@@ -51,22 +51,22 @@ available:
 ```bash
 set -a; . ./.env; set +a
 TARGET_USER=alice.admin
-KC="https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}"
-RES=(--resolve "${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}:${WL_HOST_IP}")
+KC="https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}"
+RES=(--resolve "${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}:${MFA_HOST_IP}")
 
 TOKEN=$(curl -sk "${RES[@]}" -d client_id=admin-cli -d grant_type=password \
-  -d "username=${WL_KEYCLOAK_ADMIN}" --data-urlencode "password=${WL_KEYCLOAK_ADMIN_PW}" \
+  -d "username=${MFA_KEYCLOAK_ADMIN}" --data-urlencode "password=${MFA_KEYCLOAK_ADMIN_PW}" \
   "${KC}/realms/master/protocol/openid-connect/token" | jq -r .access_token)
 
 KC_UID=$(curl -sk "${RES[@]}" -H "Authorization: Bearer ${TOKEN}" \
-  "${KC}/admin/realms/${WL_KEYCLOAK_REALM}/users?username=${TARGET_USER}&exact=true" | jq -r '.[0].id')
+  "${KC}/admin/realms/${MFA_KEYCLOAK_REALM}/users?username=${TARGET_USER}&exact=true" | jq -r '.[0].id')
 
 CRED=$(curl -sk "${RES[@]}" -H "Authorization: Bearer ${TOKEN}" \
-  "${KC}/admin/realms/${WL_KEYCLOAK_REALM}/users/${KC_UID}/credentials" \
+  "${KC}/admin/realms/${MFA_KEYCLOAK_REALM}/users/${KC_UID}/credentials" \
   | jq -r '.[] | select(.type=="otp") | .id')
 
 curl -sk "${RES[@]}" -H "Authorization: Bearer ${TOKEN}" -o /dev/null -w 'delete -> %{http_code}\n' \
-  -X DELETE "${KC}/admin/realms/${WL_KEYCLOAK_REALM}/users/${KC_UID}/credentials/${CRED}"
+  -X DELETE "${KC}/admin/realms/${MFA_KEYCLOAK_REALM}/users/${KC_UID}/credentials/${CRED}"
 ```
 
 Expected: `delete -> 204`. An empty `CRED` means the user has no OTP credential — they will be
@@ -95,7 +95,7 @@ Confirm the credential is genuinely gone rather than merely unused:
 
 ```bash
 curl -sk "${RES[@]}" -H "Authorization: Bearer ${TOKEN}" \
-  "${KC}/admin/realms/${WL_KEYCLOAK_REALM}/users/${KC_UID}/credentials" | jq -r '.[].type'
+  "${KC}/admin/realms/${MFA_KEYCLOAK_REALM}/users/${KC_UID}/credentials" | jq -r '.[].type'
 ```
 
 Expected: no `otp` line before the user re-enrols, and one afterwards.
@@ -120,12 +120,12 @@ to re-enrol on the next login. Nothing else about their access changed.
   enrolment. Compare the time on the Keycloak host and the user's device — the realm allows one
   30-second look-ahead period and no more.
 - Every user is failing the second factor, including a freshly enrolled one: the realm's browser
-  flow is `warden-lite second factor` (Username Form then OTP Form, with `auth-cookie`
+  flow is `bigip-mgt-mfa second factor` (Username Form then OTP Form, with `auth-cookie`
   deliberately absent so every redirect re-runs OTP). A modified flow or a failed realm import
   presents as a universal failure — check `docker compose logs keycloak` and see
   [../troubleshooting.md](../troubleshooting.md).
 - The user never reaches Keycloak at all: the failure is earlier in the chain, at the APM logon
   page or LDAP Auth. Start from [../../deploy.md](../../deploy.md#verification).
-- A user who cannot be found in the `warden-lite` realm is a federation problem, not an MFA one:
+- A user who cannot be found in the `bigip-mgt-mfa` realm is a federation problem, not an MFA one:
   Keycloak imports identities read-only from the directory, so the user must exist under
-  `WL_USER_SEARCH_BASE` first ([../../directory.md](../../directory.md)).
+  `MFA_USER_SEARCH_BASE` first ([../../directory.md](../../directory.md)).

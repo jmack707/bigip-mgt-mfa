@@ -1,6 +1,6 @@
 # Upgrade, rollback & teardown
 
-warden-lite is configuration, not a running product, so "upgrading" means re-applying it from a
+bigip-mgt-mfa is configuration, not a running product, so "upgrading" means re-applying it from a
 newer revision, newer container images, or an edited `.env`. Both halves of `deploy.sh` are
 idempotent, so in every case the upgrade procedure is a re-run.
 
@@ -13,8 +13,8 @@ _Last validated: 2026-07-30_
 | An older revision of this repo | `main` | `git pull`, then `./deploy.sh` (or one half) |
 | The currently pinned container images | Newer images | Edit the tags in `docker-compose.yml`, then `./deploy.sh --stack` |
 | A `.env` you have edited | The change applied | `./deploy.sh` — leaf certificates are reissued and the BIG-IP objects converge |
-| The current demo CA | A fresh CA | `WL_REGEN_CA=1 ./deploy.sh --stack`, then `./deploy.sh --bigip` — [operations/runbooks/rotate-ca.md](operations/runbooks/rotate-ca.md) |
-| Bundled OpenLDAP | Your own AD / FreeIPA / LDAP | Set `WL_DIRECTORY_MODE=external` and the `WL_LDAP_*` block, run `scripts/preflight-directory.sh`, then re-deploy — [directory.md](directory.md) |
+| The current demo CA | A fresh CA | `MFA_REGEN_CA=1 ./deploy.sh --stack`, then `./deploy.sh --bigip` — [operations/runbooks/rotate-ca.md](operations/runbooks/rotate-ca.md) |
+| Bundled OpenLDAP | Your own AD / FreeIPA / LDAP | Set `MFA_DIRECTORY_MODE=external` and the `MFA_LDAP_*` block, run `scripts/preflight-directory.sh`, then re-deploy — [directory.md](directory.md) |
 
 Downgrading is the same operation against an older revision or an older image tag, with the
 rollback caveat below.
@@ -60,7 +60,7 @@ docker compose --profile bundled ps
 The named volumes survive, so enrolled TOTP secrets and the seeded directory carry across. That
 persistence has one consequence worth knowing: the realm is imported at container start from
 `keycloak/import/`, and a realm that already exists in the persisted store is kept as-is. If you
-edit `keycloak/warden-lite-realm.json.tmpl` and need the change to actually land, the realm has
+edit `keycloak/bigip-mgt-mfa-realm.json.tmpl` and need the change to actually land, the realm has
 to be re-imported into an empty store — which means dropping `kcdata` and re-enrolling every
 user, so treat it as a rebuild rather than an upgrade:
 
@@ -69,8 +69,8 @@ user, so treat it as a rebuild rather than an upgrade:
 ```
 
 A Keycloak upgrade does not touch the BIG-IP as long as the issuer string is unchanged. APM
-validates the issuer literally, so if you change `WL_KEYCLOAK_FQDN`, `WL_KEYCLOAK_PORT` or
-`WL_KEYCLOAK_REALM`, run the BIG-IP half afterwards as well.
+validates the issuer literally, so if you change `MFA_KEYCLOAK_FQDN`, `MFA_KEYCLOAK_PORT` or
+`MFA_KEYCLOAK_REALM`, run the BIG-IP half afterwards as well.
 
 ### Re-running after editing `.env`
 
@@ -79,8 +79,8 @@ $EDITOR .env
 ./deploy.sh                       # or --stack / --bigip for one half
 ```
 
-`gen-certs.sh` reissues the leaf certificates on every run, so a changed `WL_HOST_IP`,
-`WL_KEYCLOAK_FQDN`, `WL_WEBTOP_FQDN` or `WL_APM_VIP` produces correct SANs immediately — but the
+`gen-certs.sh` reissues the leaf certificates on every run, so a changed `MFA_HOST_IP`,
+`MFA_KEYCLOAK_FQDN`, `MFA_WEBTOP_FQDN` or `MFA_APM_VIP` produces correct SANs immediately — but the
 new `webtop.crt` only reaches the appliances via the BIG-IP half, and Keycloak and OpenLDAP read
 their certificate files at process start. `docker compose up -d` does not restart a service
 whose definition has not changed, so restart them explicitly when the certificates moved:
@@ -90,8 +90,8 @@ docker compose --profile bundled restart keycloak openldap
 ./deploy.sh --bigip
 ```
 
-Changes to the directory block (`BASE_DN`, `WL_ADMIN_GROUP_DN`, `WL_ADMIN_ROLE_ATTRIBUTE`,
-`WL_LOGIN_ATTR`) affect all three consumers — the APM AAA agent, the BIG-IP `remote-role`, and
+Changes to the directory block (`BASE_DN`, `MFA_ADMIN_GROUP_DN`, `MFA_ADMIN_ROLE_ATTRIBUTE`,
+`MFA_LOGIN_ATTR`) affect all three consumers — the APM AAA agent, the BIG-IP `remote-role`, and
 Keycloak's federation — so they need both halves. Re-seeding is additive: `deploy.sh` will not
 move existing entries to a new `BASE_DN`, so a base-DN change is a rebuild
 ([Teardown](#teardown), then a fresh deploy).
@@ -101,7 +101,7 @@ A new CA invalidates every browser trust import and both BIG-IP trust anchors, s
 and always takes two steps:
 
 ```bash
-WL_REGEN_CA=1 ./deploy.sh --stack   # mint a new CA and reissue every leaf certificate
+MFA_REGEN_CA=1 ./deploy.sh --stack   # mint a new CA and reissue every leaf certificate
 docker compose --profile bundled restart keycloak openldap
 ./deploy.sh --bigip                 # push the new anchor + VIP certificate to the appliances
 ```
@@ -160,7 +160,7 @@ The BIG-IP half runs first when both are selected, and within it the auth source
 pointing at a half-removed configuration. What it leaves alone by design: the trust anchors, the
 uploaded certificates and the demo CA (inert on their own, and not worth disturbing on a shared
 lab appliance); the BIG-IPs' local accounts, licence and provisioning; and **an external
-directory** — warden-lite creates nothing in yours, binds read-only, and never writes, so there
+directory** — bigip-mgt-mfa creates nothing in yours, binds read-only, and never writes, so there
 is nothing of its making to delete there ([directory.md](directory.md)). The per-object detail
 is in [deploy.md](deploy.md#rollback).
 
@@ -178,9 +178,9 @@ rm -rf certs keycloak/import dns/Corefile
 
 ### Verification
 ```bash
-docker ps --format '{{.Names}}'                     # no keycloak / warden-lite-dns / openldap
+docker ps --format '{{.Names}}'                     # no keycloak / bigip-mgt-mfa-dns / openldap
 curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" "https://${BIGIP_A_MGMT}/mgmt/tm/auth/source" | jq -r .type
 ```
 
-Expected: no warden-lite containers, and `local` from each unit. Confirm you can still log in to
+Expected: no bigip-mgt-mfa containers, and `local` from each unit. Confirm you can still log in to
 both TMUIs as the local `admin` before you walk away.

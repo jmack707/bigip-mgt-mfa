@@ -1,6 +1,6 @@
 # Runbook — Roll the demo CA
 
-Mint a new warden-lite CA, reissue the three server certificates it signs, and replace the trust
+Mint a new bigip-mgt-mfa CA, reissue the three server certificates it signs, and replace the trust
 anchors that depend on it — on both BIG-IPs and in every browser that trusts the old one.
 
 _Last validated: 2026-07-30_
@@ -11,7 +11,7 @@ _Last validated: 2026-07-30_
   host and this is a lab CA, not a managed one.
 - A demo environment is being handed to someone else and should not keep trusting material the
   previous holder still has.
-- You changed `WL_HOST_IP`, `WL_KEYCLOAK_FQDN`, `WL_WEBTOP_FQDN` or `WL_APM_VIP`. This case does
+- You changed `MFA_HOST_IP`, `MFA_KEYCLOAK_FQDN`, `MFA_WEBTOP_FQDN` or `MFA_APM_VIP`. This case does
   **not** need a CA roll: the leaf certificates are reissued on every ordinary
   `./deploy.sh --stack` and only the SANs change. Use
   [../../upgrade.md](../../upgrade.md#procedure) instead.
@@ -42,14 +42,14 @@ down until both halves of `deploy.sh` have run and the anchors are back.
    openssl x509 -in certs/ca.crt -noout -fingerprint -sha256 -enddate
    ```
 
-2. Mint the new CA and reissue every leaf certificate. `WL_REGEN_CA=1` is the only thing that
+2. Mint the new CA and reissue every leaf certificate. `MFA_REGEN_CA=1` is the only thing that
    makes `gen-certs.sh` replace an existing CA; without it the run reuses what is there:
 
    ```bash
-   WL_REGEN_CA=1 ./deploy.sh --stack
+   MFA_REGEN_CA=1 ./deploy.sh --stack
    ```
 
-   Expect `WL_REGEN_CA=1: minting a NEW CA (existing trust imports become invalid)` followed by
+   Expect `MFA_REGEN_CA=1: minting a NEW CA (existing trust imports become invalid)` followed by
    three (bundled) or two (external) `issue` lines.
 
 3. Restart the containers that read certificate files at process start. `docker compose up -d`
@@ -75,13 +75,13 @@ down until both halves of `deploy.sh` have run and the anchors are back.
    distrusts it fails at the redirect rather than showing a certificate warning.
 
 In external directory mode step 2 does not reissue an LDAPS certificate — the BIG-IP validates
-your directory against `WL_LDAP_CA_FILE`, which this runbook does not touch. Only the Keycloak
+your directory against `MFA_LDAP_CA_FILE`, which this runbook does not touch. Only the Keycloak
 and webtop certificates change.
 
 ## Verification
 ```bash
 openssl x509 -in certs/ca.crt -noout -fingerprint -sha256 -enddate
-openssl s_client -connect "${WL_HOST_IP}:${WL_KEYCLOAK_PORT}" -servername "${WL_KEYCLOAK_FQDN}" \
+openssl s_client -connect "${MFA_HOST_IP}:${MFA_KEYCLOAK_PORT}" -servername "${MFA_KEYCLOAK_FQDN}" \
   </dev/null 2>/dev/null | openssl x509 -noout -issuer -dates
 ./scripts/validate.sh; echo "failed checks: $?"
 scripts/demo-login.sh alice.admin
@@ -99,7 +99,7 @@ shows up at the next failover:
 for u in "${BIGIP_A_MGMT}" "${BIGIP_B_MGMT}"; do
   printf '%s ' "$u"
   curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" \
-    "https://${u}/mgmt/tm/sys/file/ssl-cert/${WL_LDAP_CA_NAME:-warden-lite-ca.crt}" \
+    "https://${u}/mgmt/tm/sys/file/ssl-cert/${MFA_LDAP_CA_NAME:-bigip-mgt-mfa-ca.crt}" \
     | jq -r '.checksum // "missing"'
 done
 ```
@@ -107,7 +107,7 @@ done
 Expected: the same non-empty checksum from both units.
 
 ## Rollback
-Restore the backup taken in step 1 and re-run both halves without `WL_REGEN_CA`, which reuses
+Restore the backup taken in step 1 and re-run both halves without `MFA_REGEN_CA`, which reuses
 the CA it finds:
 
 ```bash
@@ -129,7 +129,7 @@ key is gone and the only way forward is to finish the roll and re-import everywh
   anchor did not update on that unit. Re-run `BIGIP_MGMT=<unit> bigip/system-auth.sh` and read
   the `HTTP` lines it prints.
 - The webtop loads but the Keycloak redirect fails: the browser still holds only the old CA, or
-  the BIG-IP's OAuth back-channel is validating against the stale `warden-lite-ca.crt` uploaded
+  the BIG-IP's OAuth back-channel is validating against the stale `bigip-mgt-mfa-ca.crt` uploaded
   by the APM build — re-run `./deploy.sh --bigip` and see
   [../troubleshooting.md](../troubleshooting.md).
 - Anything still unexplained after the anchors are confirmed on both units belongs with the lab

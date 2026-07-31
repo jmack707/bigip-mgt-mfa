@@ -4,7 +4,7 @@
 #
 # Order matters: policy/profile first, then the items they reference, or TMOS refuses the
 # delete with "is in use".
-wl_apm_objects() { # wl_apm_objects <prefix> <partition>
+mfa_apm_objects() { # mfa_apm_objects <prefix> <partition>
   local p="$1" part="$2"
   cat <<EOF
 ltm/virtual/~${part}~${p}-vs

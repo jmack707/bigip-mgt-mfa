@@ -1,7 +1,7 @@
 # Contributing
 
 ## Development setup
-warden-lite is shell, declarative BIG-IP configuration, and a Keycloak realm template. There
+bigip-mgt-mfa is shell, declarative BIG-IP configuration, and a Keycloak realm template. There
 is no build step and nothing to compile.
 
 You need a Linux host with Docker and the compose V2 plugin, plus `openssl`, `jq`,

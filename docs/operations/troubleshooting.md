@@ -105,7 +105,7 @@ must be configured explicitly, which is why `deploy.sh --bigip` loops over `BIGI
 `BIGIP_B_MGMT`. Verify on each unit:
 
 ```bash
-tmsh list auth remote-role role-info warden_lite_admins
+tmsh list auth remote-role role-info bigip_mgt_mfa_admins
 tmsh list auth source
 ```
 
@@ -125,7 +125,7 @@ rendering. If you import the template by hand, strip them too:
 
 ```bash
 jq 'walk(if type == "object" then with_entries(select(.key | startswith("_comment") | not)) else . end)' \
-  keycloak/warden-lite-realm.json.tmpl
+  keycloak/bigip-mgt-mfa-realm.json.tmpl
 ```
 
 ## The BIG-IP cannot resolve Keycloak
@@ -134,12 +134,12 @@ perfectly from your workstation.
 
 A TMOS `dns-resolver` performs its own lookups in TMM. It does **not** read the appliance's
 `/etc/hosts`, so a hosts-file entry cannot fix this — that workaround covers the browser only.
-warden-lite ships CoreDNS for exactly this reason. Check the resolver and that it can reach
+bigip-mgt-mfa ships CoreDNS for exactly this reason. Check the resolver and that it can reach
 the stack host:
 
 ```bash
-tmsh list net dns-resolver warden-lite-resolver
-dig +short @<WL_HOST_IP> <WL_KEYCLOAK_FQDN>
+tmsh list net dns-resolver bigip-mgt-mfa-resolver
+dig +short @<MFA_HOST_IP> <MFA_KEYCLOAK_FQDN>
 ```
 
 Also confirm the issuer matches. `KC_HOSTNAME` pins Keycloak's issuer, and APM validates it
@@ -153,7 +153,7 @@ neither value.
 failed to bind host port 0.0.0.0:53/tcp: address already in use
 ```
 
-Most Linux hosts already run a stub resolver — systemd-resolved on `127.0.0.53`. warden-lite
+Most Linux hosts already run a stub resolver — systemd-resolved on `127.0.0.53`. bigip-mgt-mfa
 binds CoreDNS to the host's lab address rather than the wildcard, which avoids the collision
 and is also the exact address the BIG-IP resolver points at. Confirm what holds the port:
 
@@ -161,7 +161,7 @@ and is also the exact address the BIG-IP resolver points at. Confirm what holds 
 sudo ss -lntup | grep ':53'
 ```
 
-If something is genuinely bound to `WL_HOST_IP:53`, set `WL_DNS_PORT` to a free port and
+If something is genuinely bound to `MFA_HOST_IP:53`, set `MFA_DNS_PORT` to a free port and
 re-run `./deploy.sh` so the BIG-IP resolver is rebuilt with the new port.
 
 ## memberOf is empty
@@ -177,14 +177,14 @@ where the membership exists but `memberOf` does not — and since `remote-role` 
 group membership:
 
 ```bash
-docker exec -i openldap ldapmodify -x -D "cn=admin,${BASE_DN}" -w "${WL_LDAP_ADMIN_PW}" <<'LDIF'
-dn: cn=bigip-admins,ou=groups,dc=warden-lite,dc=lab
+docker exec -i openldap ldapmodify -x -D "cn=admin,${BASE_DN}" -w "${MFA_LDAP_ADMIN_PW}" <<'LDIF'
+dn: cn=bigip-admins,ou=groups,dc=bigip-mgt-mfa,dc=lab
 changetype: modify
 delete: member
-member: uid=alice.admin,ou=people,dc=warden-lite,dc=lab
+member: uid=alice.admin,ou=people,dc=bigip-mgt-mfa,dc=lab
 -
 add: member
-member: uid=alice.admin,ou=people,dc=warden-lite,dc=lab
+member: uid=alice.admin,ou=people,dc=bigip-mgt-mfa,dc=lab
 LDIF
 ```
 
@@ -219,8 +219,8 @@ Creating or using a portal resource fails with `01490585` / `errorcode=17`.
 
 APM refuses "reserved" addresses as portal targets — self-IPs, the management address, and
 device-trust or cluster addresses. Publishing TMUI on a routable self-IP would be a security
-problem in any case. warden-lite points each portal resource at a non-routable RFC 5737
-façade (`WL_SHADOW_A`, `WL_SHADOW_B`) and steers the last hop with an iRule `node` statement,
+problem in any case. bigip-mgt-mfa points each portal resource at a non-routable RFC 5737
+façade (`MFA_SHADOW_A`, `MFA_SHADOW_B`) and steers the last hop with an iRule `node` statement,
 since an LTM pool cannot hold a self-IP. That path needs two database keys, which
 `bigip/apm-build.sh` sets:
 

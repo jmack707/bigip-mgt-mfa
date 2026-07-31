@@ -3,7 +3,7 @@
 _Last validated: 2026-07-31_
 
 ## When to use this
-- Standing up warden-lite for the first time and you need users able to log in.
+- Standing up bigip-mgt-mfa for the first time and you need users able to log in.
 - Adding a new user to an existing deployment.
 - Replacing a user's token because they lost their phone, or revoking one when they leave.
 
@@ -42,7 +42,7 @@ digits, 30 seconds, SHA1.
 ./deploy.sh --bigip
 ```
 
-Nothing works until this runs. It loads the seeds into the `warden_lite_totp_dg` data group,
+Nothing works until this runs. It loads the seeds into the `bigip_mgt_mfa_totp_dg` data group,
 installs the verification iRule, rebuilds the access policy, and config-syncs to the peer.
 
 **4. Log in.** Browse to the webtop VIP and fill in all three fields on the single logon page:
@@ -63,7 +63,7 @@ an earlier design shipped with.
 To confirm a seed actually reached the appliance:
 
 ```bash
-tmsh list ltm data-group internal warden_lite_totp_dg
+tmsh list ltm data-group internal bigip_mgt_mfa_totp_dg
 ```
 
 ## Rollback
@@ -82,7 +82,7 @@ To take MFA out of the path entirely — only as an emergency measure, and it le
 protected by a password alone — disable the front door instead of weakening the policy:
 
 ```bash
-tmsh modify ltm virtual warden-lite-vs disabled
+tmsh modify ltm virtual bigip-mgt-mfa-vs disabled
 ```
 
 ## Escalation

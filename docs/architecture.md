@@ -1,7 +1,7 @@
 # Architecture
 
 ## Context
-warden-lite exists to make one story reproducible: a customer signs into a BIG-IP APM webtop
+bigip-mgt-mfa exists to make one story reproducible: a customer signs into a BIG-IP APM webtop
 with a password and a one-time code, and reaches the management UI of two BIG-IPs as
 themselves, with a role the BIG-IPs derive from their directory group.
 
@@ -12,14 +12,14 @@ that asserts the result rather than assuming it.
 
 The demo is deliberately smaller than [Warden](https://github.com/jmack707/warden). Warden
 answers "how do I grant privileged access without handing out a standing credential", and
-pays for that answer with a vault, a PKI, and credential rotation. warden-lite answers the
+pays for that answer with a vault, a PKI, and credential rotation. bigip-mgt-mfa answers the
 much more common "how do I put MFA in front of BIG-IP management and keep per-user
 attribution", and pays almost nothing.
 
 ## Components
 | Component | Runs where | Responsibility |
 |---|---|---|
-| APM access policy `warden-lite` | BIG-IP A, config-synced to B | Logon page, LDAP authentication, OIDC step-up, webtop, form SSO into both TMUIs |
+| APM access policy `bigip-mgt-mfa` | BIG-IP A, config-synced to B | Logon page, LDAP authentication, OIDC step-up, webtop, form SSO into both TMUIs |
 | Keycloak 26 | Docker | The second factor only. Federates the directory read-only; never a password store |
 | OpenLDAP | Docker, `bundled` profile | Demo directory and the two demo principals. Absent in external mode |
 | CoreDNS | Docker | Authoritative for the demo zone; forwards everything else |
@@ -49,7 +49,7 @@ The credential that reaches TMUI is the user's own. There is no shared account, 
 and nothing to rotate.
 
 ## Trust boundaries
-- **The browser trusts the demo CA.** warden-lite issues its own CA and the certificates for
+- **The browser trusts the demo CA.** bigip-mgt-mfa issues its own CA and the certificates for
   the webtop VIP and Keycloak. Until that CA is imported, browsers warn. The VIP certificate
   matters more than it looks: its name is the OIDC `redirect_uri` origin.
 - **The BIG-IP trusts the same CA** for the OAuth back channel and for LDAPS.
@@ -77,7 +77,7 @@ and nothing to rotate.
   in exactly the environments this demo has to run in.
 - **The BIG-IP needs real DNS.** A TMOS `dns-resolver` performs its own lookups in TMM and
   does not read the appliance's hosts file, so a hosts-file workaround can cover the browser
-  but never the BIG-IP. warden-lite therefore ships CoreDNS rather than depending on a DNS
+  but never the BIG-IP. bigip-mgt-mfa therefore ships CoreDNS rather than depending on a DNS
   server you may not be permitted to edit.
 - **APM refuses "reserved" portal targets.** Self-IPs, the management address, and cluster
   addresses are rejected outright, and publishing TMUI on a routable self-IP would be a hole

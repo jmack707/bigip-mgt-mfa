@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end checks for a deployed warden-lite. Read-only: it asserts, it never configures.
+# End-to-end checks for a deployed bigip-mgt-mfa. Read-only: it asserts, it never configures.
 # Run after ./deploy.sh. Exit code is the number of failed checks.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -14,54 +14,54 @@ bad(){  printf '  \033[31mFAIL\033[0m  %s\n' "$*"; FAIL=$((FAIL+1)); }
 skip(){ printf '  \033[33mSKIP\033[0m  %s\n' "$*"; }
 sect(){ printf '\n\033[36m== %s ==\033[0m\n' "$*"; }
 
-KC="https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}"
-RES=(--resolve "${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}:${WL_HOST_IP}")
+KC="https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}"
+RES=(--resolve "${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}:${MFA_HOST_IP}")
 
 sect "containers"
-for c in keycloak warden-lite-dns; do
+for c in keycloak bigip-mgt-mfa-dns; do
   [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] \
     && ok "$c running" || bad "$c not running"
 done
-if wl_is_bundled; then
+if mfa_is_bundled; then
   [ "$(docker inspect -f '{{.State.Running}}' openldap 2>/dev/null)" = true ] \
     && ok "openldap running" || bad "openldap not running"
 fi
 
 sect "demo DNS zone"
-for pair in "${WL_KEYCLOAK_FQDN}:${WL_HOST_IP}" "${WL_WEBTOP_FQDN}:${WL_APM_VIP}"; do
+for pair in "${MFA_KEYCLOAK_FQDN}:${MFA_HOST_IP}" "${MFA_WEBTOP_FQDN}:${MFA_APM_VIP}"; do
   name="${pair%:*}"; want="${pair##*:}"
-  got=$(dig +short +time=3 +tries=1 "@${WL_HOST_IP}" -p "${WL_DNS_PORT:-53}" "$name" 2>/dev/null | tail -1)
+  got=$(dig +short +time=3 +tries=1 "@${MFA_HOST_IP}" -p "${MFA_DNS_PORT:-53}" "$name" 2>/dev/null | tail -1)
   [ "$got" = "$want" ] && ok "$name -> $got" || bad "$name resolved '$got', expected '$want'"
 done
 
 sect "directory"
-LDAP_URI="ldap://${WL_LDAP_HOST}:${WL_LDAP_PORT}"
-ldapwhoami -x -H "$LDAP_URI" -D "${WL_BIND_DN}" -w "${WL_BIND_PW}" >/dev/null 2>&1 \
-  && ok "bind account can bind" || bad "bind account cannot bind as ${WL_BIND_DN}"
+LDAP_URI="ldap://${MFA_LDAP_HOST}:${MFA_LDAP_PORT}"
+ldapwhoami -x -H "$LDAP_URI" -D "${MFA_BIND_DN}" -w "${MFA_BIND_PW}" >/dev/null 2>&1 \
+  && ok "bind account can bind" || bad "bind account cannot bind as ${MFA_BIND_DN}"
 # The demo's whole authorization story in two assertions: alice is in the admin group and
 # bob is not. If these are wrong, the TMUI role outcome is wrong too.
 for u in alice.admin bob.user; do
-  ldapwhoami -x -H "$LDAP_URI" -D "${WL_LOGIN_ATTR}=${u},${WL_USER_SEARCH_BASE}" -w "${WL_TEST_USER_PW}" >/dev/null 2>&1 \
+  ldapwhoami -x -H "$LDAP_URI" -D "${MFA_LOGIN_ATTR}=${u},${MFA_USER_SEARCH_BASE}" -w "${MFA_TEST_USER_PW}" >/dev/null 2>&1 \
     && ok "$u can bind with the demo password" || bad "$u cannot bind"
 done
-MEM=$(ldapsearch -x -LLL -H "$LDAP_URI" -D "${WL_BIND_DN}" -w "${WL_BIND_PW}" \
-      -b "${WL_USER_SEARCH_BASE}" "(${WL_LOGIN_ATTR}=alice.admin)" memberOf 2>/dev/null | grep -ci "${WL_ADMIN_GROUP_DN}")
-[ "${MEM:-0}" -ge 1 ] && ok "alice.admin has memberOf=${WL_ADMIN_GROUP_DN}" \
+MEM=$(ldapsearch -x -LLL -H "$LDAP_URI" -D "${MFA_BIND_DN}" -w "${MFA_BIND_PW}" \
+      -b "${MFA_USER_SEARCH_BASE}" "(${MFA_LOGIN_ATTR}=alice.admin)" memberOf 2>/dev/null | grep -ci "${MFA_ADMIN_GROUP_DN}")
+[ "${MEM:-0}" -ge 1 ] && ok "alice.admin has memberOf=${MFA_ADMIN_GROUP_DN}" \
   || bad "alice.admin is NOT in the admin group (memberof overlay applied before the group was created?)"
-MEM=$(ldapsearch -x -LLL -H "$LDAP_URI" -D "${WL_BIND_DN}" -w "${WL_BIND_PW}" \
-      -b "${WL_USER_SEARCH_BASE}" "(${WL_LOGIN_ATTR}=bob.user)" memberOf 2>/dev/null | grep -ci "${WL_ADMIN_GROUP_DN}")
+MEM=$(ldapsearch -x -LLL -H "$LDAP_URI" -D "${MFA_BIND_DN}" -w "${MFA_BIND_PW}" \
+      -b "${MFA_USER_SEARCH_BASE}" "(${MFA_LOGIN_ATTR}=bob.user)" memberOf 2>/dev/null | grep -ci "${MFA_ADMIN_GROUP_DN}")
 [ "${MEM:-0}" -eq 0 ] && ok "bob.user is not in the admin group (will land read-only)" \
   || bad "bob.user IS in the admin group — the read-only half of the demo will not show"
 
 sect "Keycloak"
-DISC="${KC}/realms/${WL_KEYCLOAK_REALM}/.well-known/openid-configuration"
+DISC="${KC}/realms/${MFA_KEYCLOAK_REALM}/.well-known/openid-configuration"
 ISS=$(curl -sk "${RES[@]}" -m8 "$DISC" | jq -r '.issuer // empty')
-[ -n "$ISS" ] && ok "realm ${WL_KEYCLOAK_REALM} published (issuer $ISS)" || bad "realm discovery failed at $DISC"
+[ -n "$ISS" ] && ok "realm ${MFA_KEYCLOAK_REALM} published (issuer $ISS)" || bad "realm discovery failed at $DISC"
 # The issuer must equal what APM was configured with, or token validation fails with an
 # error that names neither the issuer nor the mismatch.
-[ "$ISS" = "${KC}/realms/${WL_KEYCLOAK_REALM}" ] \
+[ "$ISS" = "${KC}/realms/${MFA_KEYCLOAK_REALM}" ] \
   && ok "issuer matches the APM OAuth provider URIs" \
-  || bad "issuer '$ISS' != '${KC}/realms/${WL_KEYCLOAK_REALM}' (check KC_HOSTNAME)"
+  || bad "issuer '$ISS' != '${KC}/realms/${MFA_KEYCLOAK_REALM}' (check KC_HOSTNAME)"
 AUTH_EP=$(curl -sk "${RES[@]}" -m8 "$DISC" | jq -r '.authorization_endpoint // empty')
 [ -n "$AUTH_EP" ] && ok "authorization endpoint advertised" || bad "no authorization endpoint"
 
@@ -88,7 +88,7 @@ if [ "$REST_DOWN" = 1 ]; then
   skip "every BIG-IP config check — the management plane is unreachable, not necessarily misconfigured"
   echo "        restjavad may be wedged: 'bigstart restart restjavad' on the unit."
   echo "        The data plane is separate — check the VIP before assuming the demo is down:"
-  echo "        curl -sk -o /dev/null -w '%{http_code}\n' https://${WL_APM_VIP}/"
+  echo "        curl -sk -o /dev/null -w '%{http_code}\n' https://${MFA_APM_VIP}/"
 else
 
 sect "BIG-IP access tier"
@@ -97,8 +97,8 @@ if [ -z "${BIGIP_PASS:-}" ]; then
 else
   A=(-sk -u "${BIGIP_USER}:${BIGIP_PASS}")
   for unit in "${BIGIP_A_MGMT}" "${BIGIP_B_MGMT}"; do
-    RR=$(curl "${A[@]}" -m8 "https://${unit}/mgmt/tm/auth/remote-role/role-info/warden_lite_admins" | jq -r '.attribute // empty')
-    [ "$RR" = "${WL_ADMIN_ROLE_ATTRIBUTE}" ] \
+    RR=$(curl "${A[@]}" -m8 "https://${unit}/mgmt/tm/auth/remote-role/role-info/bigip_mgt_mfa_admins" | jq -r '.attribute // empty')
+    [ "$RR" = "${MFA_ADMIN_ROLE_ATTRIBUTE}" ] \
       && ok "$unit remote-role maps ${RR} -> administrator" \
       || bad "$unit remote-role missing or wrong (got '${RR:-none}')"
     SRC=$(curl "${A[@]}" -m8 "https://${unit}/mgmt/tm/auth/source" | jq -r '.type // empty')
@@ -106,12 +106,12 @@ else
     DEF=$(curl "${A[@]}" -m8 "https://${unit}/mgmt/tm/auth/remote-user" | jq -r '.defaultRole // empty')
     [ "$DEF" = guest ] && ok "$unit default role is guest (read-only)" || bad "$unit default role is '${DEF:-unknown}'"
   done
-  AP=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/profile/access/~Common~warden-lite" | jq -r '.name // empty')
-  [ -n "$AP" ] && ok "access profile warden-lite present on A" || bad "access profile missing on A"
+  AP=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/profile/access/~Common~bigip-mgt-mfa" | jq -r '.name // empty')
+  [ -n "$AP" ] && ok "access profile bigip-mgt-mfa present on A" || bad "access profile missing on A"
   # Synced, not just built: the peer must carry the policy or a failover loses the webtop.
-  APB=$(curl "${A[@]}" -m8 "https://${BIGIP_B_MGMT}/mgmt/tm/apm/profile/access/~Common~warden-lite" | jq -r '.name // empty')
+  APB=$(curl "${A[@]}" -m8 "https://${BIGIP_B_MGMT}/mgmt/tm/apm/profile/access/~Common~bigip-mgt-mfa" | jq -r '.name // empty')
   [ -n "$APB" ] && ok "access profile synced to B" || bad "access profile NOT on B — run a config-sync"
-  RES_N=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/resource/portal-access" | jq -r '[.items[]?|select(.name|startswith("warden-lite-bigip"))]|length')
+  RES_N=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/resource/portal-access" | jq -r '[.items[]?|select(.name|startswith("bigip-mgt-mfa-bigip"))]|length')
   [ "${RES_N:-0}" = 2 ] && ok "two portal resources (one per unit)" || bad "expected 2 portal resources, found ${RES_N:-0}"
   # A portal resource can exist, publish and rewrite perfectly while carrying NO SSO
   # configuration: passing sso inside items.item1 on a REST create returns 200 and is then
@@ -121,10 +121,10 @@ else
     # The /items SUB-COLLECTION, not the parent object: the parent's representation omits
     # nested item fields entirely and reports sso as null even when it is correctly set.
     # Reading the parent produces a convincing false alarm.
-    SSO=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/resource/portal-access/~Common~warden-lite-${r}-tmui/items" | jq -r '.items[0].sso // empty')
+    SSO=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/resource/portal-access/~Common~bigip-mgt-mfa-${r}-tmui/items" | jq -r '.items[0].sso // empty')
     [ -n "$SSO" ] && ok "${r} portal resource has form SSO attached" || bad "${r} portal resource has NO SSO — the webtop will ask for a second login"
   done
-  VS=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/ltm/virtual/~Common~warden-lite-vs" | jq -r '.destination // empty')
+  VS=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/ltm/virtual/~Common~bigip-mgt-mfa-vs" | jq -r '.destination // empty')
   [ -n "$VS" ] && ok "webtop virtual server $VS" || bad "webtop virtual server missing"
 fi
 
@@ -137,7 +137,7 @@ else
   # a status-code test would read that as "broken" when it is exactly right. The audit line
   # records the role TMOS actually assigned.
   probe_role(){ # probe_role <unit> <user>
-    curl -sk -m10 -o /dev/null -u "${2}:${WL_TEST_USER_PW}" "https://${1}/mgmt/tm/sys/version" 2>/dev/null
+    curl -sk -m10 -o /dev/null -u "${2}:${MFA_TEST_USER_PW}" "https://${1}/mgmt/tm/sys/version" 2>/dev/null
     sleep 3
     curl -sk -m10 -u "${BIGIP_USER}:${BIGIP_PASS}" -X POST -H 'Content-Type: application/json' \
       "https://${1}/mgmt/tm/util/bash" \
@@ -157,10 +157,10 @@ fi
 fi   # end of the management-plane gate
 
 sect "front door"
-CODE=$(curl -sk -o /dev/null -w '%{http_code}' -m10 --resolve "${WL_WEBTOP_FQDN}:443:${WL_APM_VIP}" "https://${WL_WEBTOP_FQDN}/" 2>/dev/null)
+CODE=$(curl -sk -o /dev/null -w '%{http_code}' -m10 --resolve "${MFA_WEBTOP_FQDN}:443:${MFA_APM_VIP}" "https://${MFA_WEBTOP_FQDN}/" 2>/dev/null)
 case "$CODE" in
-  200|302) ok "VIP answers on https://${WL_WEBTOP_FQDN}/ (HTTP $CODE)";;
-  000)     bad "VIP ${WL_APM_VIP} unreachable from this host (routing, or run this from a host on that network)";;
+  200|302) ok "VIP answers on https://${MFA_WEBTOP_FQDN}/ (HTTP $CODE)";;
+  000)     bad "VIP ${MFA_APM_VIP} unreachable from this host (routing, or run this from a host on that network)";;
   *)       bad "VIP answered HTTP $CODE";;
 esac
 

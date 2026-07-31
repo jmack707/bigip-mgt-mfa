@@ -17,14 +17,14 @@ set -a; . "${HERE}/../.env"; set +a
 . "${HERE}/lib/directory.sh"
 
 USER_ID="${1:-alice.admin}"
-PW="${WL_TEST_USER_PW}"
+PW="${MFA_TEST_USER_PW}"
 SECRET_FILE="${HERE}/../certs/.totp-${USER_ID}"     # gitignored with the rest of certs/
 J=$(mktemp); trap 'rm -f "$J"' EXIT
 
-WEBTOP="https://${WL_WEBTOP_FQDN}"
+WEBTOP="https://${MFA_WEBTOP_FQDN}"
 CURL=(-sk -c "$J" -b "$J"
-      --resolve "${WL_WEBTOP_FQDN}:443:${WL_APM_VIP}"
-      --resolve "${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}:${WL_HOST_IP}")
+      --resolve "${MFA_WEBTOP_FQDN}:443:${MFA_APM_VIP}"
+      --resolve "${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}:${MFA_HOST_IP}")
 
 ok(){  printf '  \033[32m%s\033[0m\n' "$*"; }
 bad(){ printf '  \033[31m%s\033[0m\n' "$*"; exit 1; }
@@ -40,7 +40,7 @@ KC_URL=$(curl "${CURL[@]}" -o /dev/null -w '%{redirect_url}' \
   -d "username=${USER_ID}" --data-urlencode "password=${PW}" -d "vhost=standard" \
   "${WEBTOP}/my.policy")
 case "$KC_URL" in
-  *"${WL_KEYCLOAK_FQDN}"*) ok "password accepted, stepped up to Keycloak" ;;
+  *"${MFA_KEYCLOAK_FQDN}"*) ok "password accepted, stepped up to Keycloak" ;;
   "") bad "no redirect — the password was rejected, or LDAP Auth failed (check /var/log/apm)" ;;
   *)  bad "unexpected redirect: $KC_URL" ;;
 esac
@@ -67,7 +67,7 @@ if grep -q 'name="totpSecret"' <<<"$PAGE"; then
   CODE=$(oathtool --totp -b "$SECRET")
   [ -n "$CODE" ] || bad "could not compute a TOTP code from the enrolled secret"
   PAGE=$(curl "${CURL[@]}" -L \
-    -d "totp=${CODE}" -d "userLabel=warden-lite-demo" --data-urlencode "totpSecret=${RAW}" "$ACTION")
+    -d "totp=${CODE}" -d "userLabel=bigip-mgt-mfa-demo" --data-urlencode "totpSecret=${RAW}" "$ACTION")
   ok "enrolled and verified"
 else
   [ -s "$SECRET_FILE" ] || bad "OTP required but no enrolled secret cached at ${SECRET_FILE##*/}"
@@ -79,7 +79,7 @@ else
   # Posting the wrong one is silently ignored and Keycloak just redisplays the form.
   FIELD=totp; grep -q 'name="otp"' <<<"$PAGE" && FIELD=otp
   PAGE=$(curl "${CURL[@]}" -L -w '\n%{url_effective}' -d "${FIELD}=${CODE}" "$ACTION")
-  grep -q "${WL_WEBTOP_FQDN}" <<<"$PAGE" || bad "OTP rejected — Keycloak did not redirect back to APM"
+  grep -q "${MFA_WEBTOP_FQDN}" <<<"$PAGE" || bad "OTP rejected — Keycloak did not redirect back to APM"
   ok "second factor accepted"
 fi
 
@@ -98,8 +98,8 @@ DUMP=$(curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" -X POST -H 'Content-Type: appli
   -d '{"command":"run","utilCmdArgs":"-c \"sessiondump --allkeys 2>/dev/null | grep assigned.resources.pa | tail -1\""}' \
   | jq -r '.commandResult // ""')
 FOUND=0
-grep -q 'warden-lite-bigip-a-tmui' <<<"$DUMP" && { ok "BIG-IP A TMUI published to the webtop"; FOUND=$((FOUND+1)); }
-grep -q 'warden-lite-bigip-b-tmui' <<<"$DUMP" && { ok "BIG-IP B TMUI published to the webtop"; FOUND=$((FOUND+1)); }
+grep -q 'bigip-mgt-mfa-bigip-a-tmui' <<<"$DUMP" && { ok "BIG-IP A TMUI published to the webtop"; FOUND=$((FOUND+1)); }
+grep -q 'bigip-mgt-mfa-bigip-b-tmui' <<<"$DUMP" && { ok "BIG-IP B TMUI published to the webtop"; FOUND=$((FOUND+1)); }
 [ "$FOUND" = 2 ] || bad "expected both TMUI resources on the session, got: ${DUMP:-<empty>}"
 
 printf '\n\033[32m%s: password -> LDAP -> Keycloak TOTP -> webtop, with both BIG-IPs published.\033[0m\n' "$USER_ID"

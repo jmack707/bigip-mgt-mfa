@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove what warden-lite created. Two halves, mirroring deploy.sh:
+# Remove what bigip-mgt-mfa created. Two halves, mirroring deploy.sh:
 #
 #   ./teardown.sh --stack    stop the containers. Add --volumes to delete their data, which
 #                            DESTROYS every enrolled TOTP secret.
@@ -41,7 +41,7 @@ say(){ printf '\n\033[36m==> %s\033[0m\n' "$*"; }
 
 if [ "$DO_BIGIP" = 1 ]; then
   : "${BIGIP_PASS:?set BIGIP_PASS}"
-  P=warden-lite; PART=Common
+  P=bigip-mgt-mfa; PART=Common
   for unit in "${BIGIP_A_MGMT}" "${BIGIP_B_MGMT}"; do
     say "restoring local authentication on ${unit}"
     # First, so that a failure later cannot leave the unit pointed at a directory that is
@@ -50,7 +50,7 @@ if [ "$DO_BIGIP" = 1 ]; then
       -X PATCH -H 'Content-Type: application/json' -d '{"type":"local"}' \
       "https://${unit}/mgmt/tm/auth/source"
     curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" -o /dev/null -w '  remote-role  -> %{http_code}\n' \
-      -X DELETE "https://${unit}/mgmt/tm/auth/remote-role/role-info/warden_lite_admins"
+      -X DELETE "https://${unit}/mgmt/tm/auth/remote-role/role-info/bigip_mgt_mfa_admins"
   done
 
   say "deleting the APM access tier on ${BIGIP_A_MGMT}"
@@ -58,7 +58,7 @@ if [ "$DO_BIGIP" = 1 ]; then
   # Same list the build uses, so the two cannot drift.
   while IFS= read -r o; do
     curl "${A[@]}" -o /dev/null -w "  DEL ${o##*~} -> %{http_code}\n" -X DELETE "$B/mgmt/tm/${o}"
-  done < <(wl_apm_objects "$P" "$PART")
+  done < <(mfa_apm_objects "$P" "$PART")
   # Then the supporting objects the build creates outside that list.
   for o in \
     "ltm/virtual/~${PART}~${P}-shadow-a-vs" "ltm/virtual/~${PART}~${P}-shadow-b-vs" \
@@ -83,7 +83,7 @@ if [ "$DO_BIGIP" = 1 ]; then
   curl "${A[@]}" -o /dev/null -X POST -H 'Content-Type: application/json' \
     -d '{"command":"save"}' "$B/mgmt/tm/sys/config"
 
-  DG="${WL_DEVICE_GROUP:-}"
+  DG="${MFA_DEVICE_GROUP:-}"
   [ -z "$DG" ] && DG=$(curl "${A[@]}" "$B/mgmt/tm/cm/device-group" \
       | jq -r '[.items[]? | select(.type=="sync-failover") | .name] | first // empty')
   if [ -n "$DG" ]; then

@@ -12,7 +12,7 @@
 # logon submission selects the seed here and was bound to the password by the LDAP Auth step
 # immediately before. There is no way to pair one user's password with another's token.
 #
-# The seed lives in the warden_lite_totp_dg data group rather than in the directory. That is
+# The seed lives in the bigip_mgt_mfa_totp_dg data group rather than in the directory. That is
 # deliberate and mirrors how a real MFA product works: the directory owns identity, the MFA
 # verifier owns token secrets. It also avoids putting a credential-equivalent secret on the
 # user's directory entry, where anything that can read the entry could mint valid codes.
@@ -20,6 +20,10 @@
 # A +/-1 step window is accepted, which is the RFC's own recommendation: it absorbs clock
 # skew between the phone and the BIG-IP without meaningfully widening the attack surface.
 # Keep the BIG-IP's NTP honest or this is the first thing that breaks.
+#
+# The step size is rendered in from MFA_TOTP_PERIOD at upload time. Note that a longer period
+# widens the acceptance window proportionally: at 60s, +/-1 step means a code stays valid for
+# up to three minutes. That is a deliberate usability trade, not an oversight.
 #
 # ASCII only. The TMOS iRule compiler rejects non-ASCII characters and reports it as
 # "braces are required around the expression" pointing at the `when` line, which sends you
@@ -36,7 +40,7 @@ when ACCESS_POLICY_AGENT_EVENT {
 
         # The seed for this user. No entry means no enrolled token, which is a denial --
         # never a pass. An un-enrolled account must not skip the second factor.
-        set b32 [string toupper [class lookup $user warden_lite_totp_dg]]
+        set b32 [string toupper [class lookup $user bigip_mgt_mfa_totp_dg]]
         if { $b32 equals "" } {
             ACCESS::session data set session.custom.totp.err "no-token"
             return
@@ -66,7 +70,7 @@ when ACCESS_POLICY_AGENT_EVENT {
         }
 
         # --- compare against this step and its immediate neighbours ---
-        set step [expr {[clock seconds] / 30}]
+        set step [expr {[clock seconds] / ${MFA_TOTP_PERIOD}}]
         set ok 0
         for { set d -1 } { $d <= 1 } { incr d } {
             set ctr [expr {$step + $d}]

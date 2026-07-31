@@ -7,22 +7,22 @@
 # would fix that by destroying every enrolled authenticator, which is not a fix.
 #
 # So the import handles first creation and this handles convergence. It is idempotent, and
-# it only touches the objects warden-lite owns: the direct-grant flow, the realm's flow
+# it only touches the objects bigip-mgt-mfa owns: the direct-grant flow, the realm's flow
 # bindings, and the client's enabled grant types.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 set -a; . "${HERE}/../.env"; set +a
 
-KC="https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}"
-R=(--resolve "${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}:${WL_HOST_IP}" -sk)
-REALM="${WL_KEYCLOAK_REALM}"
-FLOW="warden-lite direct grant"
+KC="https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}"
+R=(--resolve "${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}:${MFA_HOST_IP}" -sk)
+REALM="${MFA_KEYCLOAK_REALM}"
+FLOW="bigip-mgt-mfa direct grant"
 
 say(){ printf '  %s\n' "$*"; }
 die(){ printf '\033[31m  error: %s\033[0m\n' "$*" >&2; exit 1; }
 
-TOK=$(curl "${R[@]}" -m10 -d client_id=admin-cli -d "username=${WL_KEYCLOAK_ADMIN}" \
-      --data-urlencode "password=${WL_KEYCLOAK_ADMIN_PW}" -d grant_type=password \
+TOK=$(curl "${R[@]}" -m10 -d client_id=admin-cli -d "username=${MFA_KEYCLOAK_ADMIN}" \
+      --data-urlencode "password=${MFA_KEYCLOAK_ADMIN_PW}" -d grant_type=password \
       "$KC/realms/master/protocol/openid-connect/token" | jq -r '.access_token // empty')
 [ -n "$TOK" ] || die "cannot authenticate to the Keycloak admin API"
 API(){ curl "${R[@]}" -m15 -H "Authorization: Bearer $TOK" "$@"; }
@@ -63,10 +63,10 @@ AJ -X PUT -o /dev/null -w '  realm flow bindings -> %{http_code}\n' \
   "$KC/admin/realms/${REALM}"
 
 # 3. the client: direct grant on, authorization-code off (APM never redirects a browser here).
-CID=$(API "$KC/admin/realms/${REALM}/clients?clientId=${WL_OIDC_CLIENT_ID}" | jq -r '.[0].id // empty')
-[ -n "$CID" ] || die "client ${WL_OIDC_CLIENT_ID} not found in realm ${REALM}"
+CID=$(API "$KC/admin/realms/${REALM}/clients?clientId=${MFA_OIDC_CLIENT_ID}" | jq -r '.[0].id // empty')
+[ -n "$CID" ] || die "client ${MFA_OIDC_CLIENT_ID} not found in realm ${REALM}"
 AJ -X PUT -o /dev/null -w '  client grant types -> %{http_code}\n' \
-  -d "$(jq -n --arg s "${WL_OIDC_CLIENT_SECRET}" '{directAccessGrantsEnabled:true,standardFlowEnabled:false,publicClient:false,secret:$s}')" \
+  -d "$(jq -n --arg s "${MFA_OIDC_CLIENT_SECRET}" '{directAccessGrantsEnabled:true,standardFlowEnabled:false,publicClient:false,secret:$s}')" \
   "$KC/admin/realms/${REALM}/clients/${CID}"
 
 say "realm ${REALM} reconciled"

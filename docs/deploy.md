@@ -30,7 +30,7 @@ Two things happen here and they are deliberately separate:
   device group and skips the sync.
 - REST reachability from the Docker host to `BIGIP_A_MGMT` and `BIGIP_B_MGMT` on `443`.
 - `.env` complete: `BIGIP_USER`, `BIGIP_A_MGMT`, `BIGIP_B_MGMT`, `BIGIP_A_TMUI`, `BIGIP_B_TMUI`,
-  `WL_APM_VIP` and `WL_WEBTOP_FQDN`. `BIGIP_PASS` may be set in `.env` (demo) or injected in the
+  `MFA_APM_VIP` and `MFA_WEBTOP_FQDN`. `BIGIP_PASS` may be set in `.env` (demo) or injected in the
   environment — an injected value wins over the file, so a production password never has to be
   written to disk.
 - `BIGIP_A_TMUI`/`BIGIP_B_TMUI` must be each unit's **non-floating internal self IP**. They are
@@ -55,9 +55,9 @@ BIGIP_MGMT="${BIGIP_B_MGMT}" bigip/system-auth.sh
 ```
 
 Per unit it uploads the directory CA as an `ssl-cert` object, creates or updates
-`auth ldap system-auth` (LDAPS on `WL_LDAPS_PORT`, CA-verified, bound as the read-only bind
+`auth ldap system-auth` (LDAPS on `MFA_LDAPS_PORT`, CA-verified, bound as the read-only bind
 account, `checkRolesGroup enabled`), sets `remote-user` to `defaultRole guest` with remote
-console access disabled, creates the single `remote-role` rule `warden_lite_admins`
+console access disabled, creates the single `remote-role` rule `bigip_mgt_mfa_admins`
 (`memberOf=<admin group> → administrator`), switches `auth source` to `ldap`, and saves the
 config.
 
@@ -79,13 +79,13 @@ the session and can be single-signed-on into TMUI, and only then steps up to Key
 second factor. A failed second factor denies rather than degrading to first-factor-only access.
 See [adr/0001-apm-first-auth-order.md](adr/0001-apm-first-auth-order.md).
 
-Each unit's TMUI is published behind a non-routable RFC5737 façade (`WL_SHADOW_A`,
-`WL_SHADOW_B`) fronted by a plain LTM virtual with a `node` iRule, because APM portal access
+Each unit's TMUI is published behind a non-routable RFC5737 façade (`MFA_SHADOW_A`,
+`MFA_SHADOW_B`) fronted by a plain LTM virtual with a `node` iRule, because APM portal access
 refuses self-IPs and management addresses as targets outright, and publishing TMUI on a routable
 external self-IP would be a hole in any case.
 
 ### Step 3 — config-sync
-`deploy.sh` resolves the sync-failover device group (from `WL_DEVICE_GROUP`, or by REST) and
+`deploy.sh` resolves the sync-failover device group (from `MFA_DEVICE_GROUP`, or by REST) and
 runs `tmsh run cm config-sync to-group <group>` on unit A. To do it by hand:
 
 ```bash
@@ -98,9 +98,9 @@ Re-running is the supported way to apply a change, and each part converges diffe
 reason:
 
 - **The CA is reused.** `scripts/gen-certs.sh` keeps an existing `certs/ca.crt`/`ca.key` unless
-  `WL_REGEN_CA=1`, because minting a fresh CA on every run would invalidate every browser trust
+  `MFA_REGEN_CA=1`, because minting a fresh CA on every run would invalidate every browser trust
   import and both BIG-IP trust anchors. The **leaf** certificates are reissued on every run, so
-  changing `WL_HOST_IP`, `WL_KEYCLOAK_FQDN`, `WL_WEBTOP_FQDN` or `WL_APM_VIP` and re-running
+  changing `MFA_HOST_IP`, `MFA_KEYCLOAK_FQDN`, `MFA_WEBTOP_FQDN` or `MFA_APM_VIP` and re-running
   produces correct SANs without any extra step.
 - **Directory seeding tolerates existing entries.** `ldapadd` runs with `-c` and the deployer
   reports "entries already present" rather than failing; the overlay step likewise reports
@@ -148,7 +148,7 @@ scripts/demo-login.sh bob.user
 ```
 
 Expected: logon page → password accepted → redirect to Keycloak → TOTP → back to APM → webtop,
-with both `warden-lite-bigip-a-tmui` and `warden-lite-bigip-b-tmui` on the session. On a user's
+with both `bigip-mgt-mfa-bigip-a-tmui` and `bigip-mgt-mfa-bigip-b-tmui` on the session. On a user's
 first run it performs the TOTP enrolment Keycloak requires and prints the secret so you can add
 it to a real authenticator and repeat the flow by hand; the secret is cached in
 `certs/.totp-<user>` for subsequent runs.
@@ -174,7 +174,7 @@ To back the appliances out entirely:
 ```
 
 The order it uses is deliberate. On **both** units it restores `auth source type local` and
-deletes the `warden_lite_admins` remote-role **first**, so a failure later cannot leave a unit
+deletes the `bigip_mgt_mfa_admins` remote-role **first**, so a failure later cannot leave a unit
 pointed at a directory configuration that is about to disappear. `admin` and `root` are always
 local accounts, so this step cannot lock you out. Only then does it delete the access tier on
 unit A — the mutable graph from `wl_apm_objects` in `bigip/lib/objects.sh`, which is the same

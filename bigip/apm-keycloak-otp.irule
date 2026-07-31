@@ -34,8 +34,8 @@ when ACCESS_POLICY_AGENT_EVENT {
 
         # URI-encode the values that may contain reserved characters.
         set body "grant_type=password"
-        append body "&client_id=${WL_OIDC_CLIENT_ID}"
-        append body "&client_secret=${WL_OIDC_CLIENT_SECRET}"
+        append body "&client_id=${MFA_OIDC_CLIENT_ID}"
+        append body "&client_secret=${MFA_OIDC_CLIENT_SECRET}"
         append body "&scope=openid"
         append body "&username=[URI::encode $u]"
         append body "&password=[URI::encode $p]"
@@ -47,8 +47,8 @@ when ACCESS_POLICY_AGENT_EVENT {
             ACCESS::session data set session.custom.kc.err "connect-failed"
             return
         }
-        set req "POST /realms/${WL_KEYCLOAK_REALM}/protocol/openid-connect/token HTTP/1.1\r\n"
-        append req "Host: ${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}\r\n"
+        set req "POST /realms/${MFA_KEYCLOAK_REALM}/protocol/openid-connect/token HTTP/1.1\r\n"
+        append req "Host: ${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}\r\n"
         append req "Content-Type: application/x-www-form-urlencoded\r\n"
         append req "Content-Length: [string length $body]\r\n"
         append req "Connection: close\r\n\r\n"

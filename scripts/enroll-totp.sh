@@ -6,7 +6,7 @@
 # seeds into the BIG-IP data group the verification iRule reads.
 #
 # This is the piece a commercial MFA product would give you as a self-service portal. It is
-# a script here because warden-lite deliberately has no MFA server -- see
+# a script here because bigip-mgt-mfa deliberately has no MFA server -- see
 # docs/adr/0006-apm-native-totp.md for what that buys and what it costs.
 #
 # Usage:  scripts/enroll-totp.sh <username> [<username> ...]
@@ -16,7 +16,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 set -a; . "${HERE}/../.env"; set +a
 SEEDS="${HERE}/../certs/totp-seeds.env"
-ISSUER="${WL_TOTP_ISSUER:-warden-lite}"
+ISSUER="${MFA_TOTP_ISSUER:-bigip-mgt-mfa}"
+PERIOD="${MFA_TOTP_PERIOD:-60}"
 mkdir -p "${HERE}/../certs"; touch "$SEEDS"; chmod 600 "$SEEDS"
 
 die(){ printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
@@ -50,7 +51,7 @@ for user in "$@"; do
   printf '%s=%s\n' "$user" "$seed" >> "$SEEDS"
   chmod 600 "$SEEDS"
 
-  uri="otpauth://totp/${ISSUER}:${user}?secret=${seed}&issuer=${ISSUER}&algorithm=SHA1&digits=6&period=30"
+  uri="otpauth://totp/${ISSUER}:${user}?secret=${seed}&issuer=${ISSUER}&algorithm=SHA1&digits=6&period=${PERIOD}"
   printf '\n\033[36m== %s ==\033[0m\n' "$user"
   if [ "$have_qr" = 1 ]; then
     qrencode -t ANSIUTF8 "$uri"
@@ -58,7 +59,15 @@ for user in "$@"; do
     echo "  (install qrencode to print a scannable code)"
   fi
   echo "  setup key : $seed"
-  echo "  type      : time-based, 6 digits, 30s, SHA1"
+  echo "  type      : time-based, 6 digits, ${PERIOD}s, SHA1"
+  # An `if`, not `[ ] && echo`: under `set -e` a false test makes the compound command return
+  # non-zero and kills the script -- and it would do so only when the period IS 30, i.e. on
+  # the default path.
+  if [ "$PERIOD" != 30 ]; then
+    echo "  NOTE      : Google Authenticator IGNORES a non-30s period and will keep showing"
+    echo "              30-second codes, which will never match. Use FreeOTP, Aegis or"
+    echo "              1Password -- all of which honour the period in the QR."
+  fi
 done
 
 printf '\n%s\n' "Seeds written to certs/totp-seeds.env (gitignored, mode 600)."

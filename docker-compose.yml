@@ -1,4 +1,4 @@
-name: warden-lite   # compose project name → volumes are prefixed warden-lite_ (not the dir name)
+name: bigip-mgt-mfa   # compose project name → volumes are prefixed bigip-mgt-mfa_ (not the dir name)
 services:
   keycloak:
     # The second factor. APM authenticates the password against the directory itself and
@@ -14,17 +14,17 @@ services:
     restart: unless-stopped
     command: start-dev --import-realm
     environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: "${WL_KEYCLOAK_ADMIN:-admin}"
-      KC_BOOTSTRAP_ADMIN_PASSWORD: "${WL_KEYCLOAK_ADMIN_PW}"
+      KC_BOOTSTRAP_ADMIN_USERNAME: "${MFA_KEYCLOAK_ADMIN:-admin}"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${MFA_KEYCLOAK_ADMIN_PW}"
       # Fixed issuer. APM validates the issuer in the returned token against exactly this
       # string, so it must not float with the request Host header.
-      KC_HOSTNAME: "https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}"
+      KC_HOSTNAME: "https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}"
       KC_HOSTNAME_STRICT: "false"
       KC_HTTPS_CERTIFICATE_FILE: /certs/keycloak.crt
       KC_HTTPS_CERTIFICATE_KEY_FILE: /certs/keycloak.key
       KC_HTTP_ENABLED: "true"
       KC_HEALTH_ENABLED: "true"
-    ports: ["${WL_KEYCLOAK_PORT:-8443}:8443"]
+    ports: ["${MFA_KEYCLOAK_PORT:-8443}:8443"]
     volumes:
       - ./certs:/certs:ro
       - ./keycloak/import:/opt/keycloak/data/import:ro
@@ -35,38 +35,38 @@ services:
     # Keycloak FQDN through a TMOS dns-resolver, which does its own lookups in TMM and does
     # NOT read the BIG-IP's /etc/hosts. So a hosts-file fallback can cover the browser but
     # can never cover the BIG-IP. Rather than make the demo depend on a DNS server you may
-    # not be allowed to edit (UDF, a customer lab), warden-lite brings its own: CoreDNS is
+    # not be allowed to edit (UDF, a customer lab), bigip-mgt-mfa brings its own: CoreDNS is
     # authoritative for the demo zone and forwards everything else upstream.
     # Point the BIG-IP resolver here; optionally point your workstation here too and the
     # hosts-file step disappears entirely.
     image: docker.io/coredns/coredns:1.12.0
-    container_name: warden-lite-dns
+    container_name: bigip-mgt-mfa-dns
     restart: unless-stopped
     command: -conf /etc/coredns/Corefile
     # Bound to the host's lab address rather than 0.0.0.0 on purpose: most Linux hosts
     # already run a stub resolver (systemd-resolved on 127.0.0.53), and binding the wildcard
     # collides with it. This is also the exact address the BIG-IP resolver is pointed at.
     ports:
-      - "${WL_HOST_IP}:${WL_DNS_PORT:-53}:53/udp"
-      - "${WL_HOST_IP}:${WL_DNS_PORT:-53}:53/tcp"
+      - "${MFA_HOST_IP}:${MFA_DNS_PORT:-53}:53/udp"
+      - "${MFA_HOST_IP}:${MFA_DNS_PORT:-53}:53/tcp"
     volumes:
       - ./dns:/etc/coredns:ro
 
   openldap:
-    # Only starts with the `bundled` profile (WL_DIRECTORY_MODE=bundled, the default).
-    # In external mode warden-lite talks to your AD/LDAP instead and this never runs:
+    # Only starts with the `bundled` profile (MFA_DIRECTORY_MODE=bundled, the default).
+    # In external mode bigip-mgt-mfa talks to your AD/LDAP instead and this never runs:
     #   docker compose --profile bundled up -d   # bundled
     #   docker compose up -d                     # external — keycloak + dns only
     profiles: ["bundled"]
     image: osixia/openldap:1.5.0
     container_name: openldap
     restart: unless-stopped
-    hostname: openldap.${WL_DOMAIN:-warden-lite.lab}
+    hostname: openldap.${MFA_DOMAIN:-bigip-mgt-mfa.lab}
     ports: ["389:389", "636:636"]
     environment:
-      LDAP_ORGANISATION: "${WL_ORG:-warden-lite}"
-      LDAP_DOMAIN: "${WL_DOMAIN:-warden-lite.lab}"
-      LDAP_ADMIN_PASSWORD: "${WL_LDAP_ADMIN_PW}"
+      LDAP_ORGANISATION: "${MFA_ORG:-bigip-mgt-mfa}"
+      LDAP_DOMAIN: "${MFA_DOMAIN:-bigip-mgt-mfa.lab}"
+      LDAP_ADMIN_PASSWORD: "${MFA_LDAP_ADMIN_PW}"
       LDAP_TLS: "true"
       LDAP_TLS_CRT_FILENAME: "ldap.crt"
       LDAP_TLS_KEY_FILENAME: "ldap.key"

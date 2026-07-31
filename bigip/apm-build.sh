@@ -30,18 +30,18 @@ _PASS_IN="${BIGIP_PASS:-}"; set -a; . "${HERE}/../.env"; set +a
 # shellcheck disable=SC1091
 . "${HERE}/lib/objects.sh"
 [ -n "$_PASS_IN" ] && BIGIP_PASS="$_PASS_IN"
-: "${BIGIP_PASS:?export BIGIP_PASS}"; : "${WL_BIND_PW:?need WL_BIND_PW}"
+: "${BIGIP_PASS:?export BIGIP_PASS}"; : "${MFA_BIND_PW:?need MFA_BIND_PW}"
 : "${BIGIP_MGMT:=${BIGIP_A_MGMT:?set BIGIP_A_MGMT}}"
 
 B="https://${BIGIP_MGMT}"; A=(-sk -u "${BIGIP_USER}:${BIGIP_PASS}")
-P=warden-lite                     # object-name prefix / access-profile name
+P=bigip-mgt-mfa                     # object-name prefix / access-profile name
 PART=Common
 AAA=${P}-ldap-aaa
-VIP_IP="${WL_APM_VIP:?set WL_APM_VIP in .env}"
-SHADOW_A="${WL_SHADOW_A:-192.0.2.5}"
-SHADOW_B="${WL_SHADOW_B:-192.0.2.6}"
+VIP_IP="${MFA_APM_VIP:?set MFA_APM_VIP in .env}"
+SHADOW_A="${MFA_SHADOW_A:-192.0.2.5}"
+SHADOW_B="${MFA_SHADOW_B:-192.0.2.6}"
 KC_AAA=${P}-keycloak-otp
-SHADOW_KC="${WL_SHADOW_KC:-192.0.2.7}"   # non-routable façade for the Keycloak call
+SHADOW_KC="${MFA_SHADOW_KC:-192.0.2.7}"   # non-routable façade for the Keycloak call
 
 step(){ echo; echo "== $* =="; }
 add(){ # add <url> <json> — additive POST tolerating 409, retrying transient failures
@@ -99,7 +99,7 @@ upload(){ # upload <local-file> <remote-name>
     "$B/mgmt/shared/file-transfer/uploads/$2" -o /dev/null -w "  upload $2 -> %{http_code}\n"
 }
 
-step "1. VIP server certificate (${WL_WEBTOP_FQDN})"
+step "1. VIP server certificate (${MFA_WEBTOP_FQDN})"
 # The browser must trust this name: it is the OIDC redirect_uri origin, and a cert error
 # here surfaces as a failed OAuth redirect rather than as a cert warning.
 upload "${HERE}/../certs/webtop.crt" "${P}-webtop.crt"
@@ -132,12 +132,12 @@ step "2. teardown the mutable graph so this re-runs cleanly"
 # objects, so they cannot be recreated while it still exists. Tearing down first makes a
 # re-run genuinely converge instead of silently keeping the previous values.
 td(){ curl "${A[@]}" -o /dev/null -w "  DEL ${1##*~} -> %{http_code}\n" -X DELETE "$1"; }
-while IFS= read -r o; do td "$B/mgmt/tm/${o}"; done < <(wl_apm_objects "$P" "$PART")
+while IFS= read -r o; do td "$B/mgmt/tm/${o}"; done < <(mfa_apm_objects "$P" "$PART")
 
 step "3. AAA LDAP server (password check happens here, by BIND)"
 # TMOS 21.x APM AAA LDAP requires a server POOL — a bare address is rejected. Single-quote
 # wrap so the DN commas pass through tmsh intact.
-bash_cmd "tmsh create ltm pool ${AAA}-pool { members add { ${WL_LDAP_HOST}:${WL_LDAP_PORT} } monitor tcp } ; tmsh create apm aaa ldap ${AAA} { pool ${AAA}-pool port ${WL_LDAP_PORT} admin-dn \"${WL_BIND_DN}\" admin-encrypted-password \"${WL_BIND_PW}\" base-dn \"${WL_USER_SEARCH_BASE}\" }"
+bash_cmd "tmsh create ltm pool ${AAA}-pool { members add { ${MFA_LDAP_HOST}:${MFA_LDAP_PORT} } monitor tcp } ; tmsh create apm aaa ldap ${AAA} { pool ${AAA}-pool port ${MFA_LDAP_PORT} admin-dn \"${MFA_BIND_DN}\" admin-encrypted-password \"${MFA_BIND_PW}\" base-dn \"${MFA_USER_SEARCH_BASE}\" }"
 
 step "4. TOTP seed store"
 # A data group, not a directory attribute. The directory owns identity; the MFA verifier
@@ -156,12 +156,15 @@ if [ -f "$SEEDS_FILE" ]; then
   done < "$SEEDS_FILE"
 fi
 echo "  seeds loaded: $(jq -r 'length' <<<"$RECORDS")"
-curl "${A[@]}" -o /dev/null -w "  DEL previous data-group -> %{http_code}\n" -X DELETE "$B/mgmt/tm/ltm/data-group/internal/~${PART}~warden_lite_totp_dg"
-add "$B/mgmt/tm/ltm/data-group/internal" "$(jq -n --argjson r "$RECORDS" '{name:"warden_lite_totp_dg",partition:"Common",type:"string",records:$r}')"
+curl "${A[@]}" -o /dev/null -w "  DEL previous data-group -> %{http_code}\n" -X DELETE "$B/mgmt/tm/ltm/data-group/internal/~${PART}~bigip_mgt_mfa_totp_dg"
+add "$B/mgmt/tm/ltm/data-group/internal" "$(jq -n --argjson r "$RECORDS" '{name:"bigip_mgt_mfa_totp_dg",partition:"Common",type:"string",records:$r}')"
 
 step "5. TOTP verification iRule"
 curl "${A[@]}" -o /dev/null -w "  DEL previous rule -> %{http_code}\n" -X DELETE "$B/mgmt/tm/ltm/rule/~${PART}~${P}-totp-verify"
-add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-totp-verify" --arg b "$(cat "${HERE}/apm-totp-verify.irule")" '{name:$n,partition:"Common",apiAnonymous:$b}')"
+# envsubst restricted to our one placeholder so the iRule's own $vars survive untouched.
+TOTP_RULE="$(MFA_TOTP_PERIOD="${MFA_TOTP_PERIOD:-60}" envsubst '${MFA_TOTP_PERIOD}' < "${HERE}/apm-totp-verify.irule")"
+echo "  TOTP step: ${MFA_TOTP_PERIOD:-60}s"
+add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-totp-verify" --arg b "$TOTP_RULE" '{name:$n,partition:"Common",apiAnonymous:$b}')"
 
 step "6. customization groups"
 add "$B/mgmt/tm/apm/policy/customization-group" "$(jq -n --arg n "${P}_act_logon_ag" '{name:$n,partition:"Common",source:"/Common/modern",type:"logon"}')"
@@ -190,7 +193,7 @@ add "$B/mgmt/tm/apm/policy/agent/logon-page" "$(jq -n --arg n "${P}_act_logon_ag
 # prove the password. Nothing reads a password hash, which is why the bind account needs no
 # privilege beyond search.
 add "$B/mgmt/tm/apm/policy/agent/aaa-ldap" "$(jq -n --arg n "${P}_act_ldapauth_ag" --arg s "/$PART/$AAA" \
-  --arg base "${WL_USER_SEARCH_BASE}" --arg f "(${WL_LOGIN_ATTR}=%{session.logon.last.username})" \
+  --arg base "${MFA_USER_SEARCH_BASE}" --arg f "(${MFA_LOGIN_ATTR}=%{session.logon.last.username})" \
   '{name:$n,partition:"Common",type:"auth",server:$s,searchDn:$base,filter:$f,maxLogonAttempt:3}')"
 add "$B/mgmt/tm/apm/policy/agent/irule-event" "$(jq -n --arg n "${P}_act_kcverify_ag" \
   '{name:$n,partition:"Common",id:"totp_verify"}')"
@@ -317,7 +320,7 @@ add "$B/mgmt/tm/ltm/virtual" "$(jq -n --arg n "${P}-vs" --arg d "/$PART/${VIP_IP
 # default" is not the same claim as "the demo configures the access tier to survive a
 # failover", and only the second one is worth making. Set on the virtual-address, not the
 # virtual server: the address is what carries a traffic group.
-bash_cmd "tmsh modify ltm virtual-address ${VIP_IP} traffic-group ${WL_APM_TRAFFIC_GROUP:-traffic-group-1}"
+bash_cmd "tmsh modify ltm virtual-address ${VIP_IP} traffic-group ${MFA_APM_TRAFFIC_GROUP:-traffic-group-1}"
 bash_cmd "tmsh save sys config"
 
-echo; echo "Done. Browse https://${WL_WEBTOP_FQDN}/ — logon page, then Keycloak for TOTP, then the webtop."
+echo; echo "Done. Browse https://${MFA_WEBTOP_FQDN}/ — logon page, then Keycloak for TOTP, then the webtop."

@@ -27,8 +27,8 @@ _PASS_IN="${BIGIP_PASS:-}"; set -a; . "${HERE}/../.env"; set +a
 
 B="https://${BIGIP_MGMT}"
 AUTH=(-sk -u "${BIGIP_USER}:${BIGIP_PASS}")
-case "${WL_LDAP_CA_FILE}" in /*) CA="${WL_LDAP_CA_FILE}";; *) CA="${HERE}/../${WL_LDAP_CA_FILE}";; esac
-[ -f "$CA" ] || { echo "directory CA not found: $CA (set WL_LDAP_CA_FILE)" >&2; exit 1; }
+case "${MFA_LDAP_CA_FILE}" in /*) CA="${MFA_LDAP_CA_FILE}";; *) CA="${HERE}/../${MFA_LDAP_CA_FILE}";; esac
+[ -f "$CA" ] || { echo "directory CA not found: $CA (set MFA_LDAP_CA_FILE)" >&2; exit 1; }
 
 jqok(){ jq -e "$1" >/dev/null 2>&1; }
 req(){ # req METHOD URL [JSON]
@@ -50,20 +50,20 @@ req(){ # req METHOD URL [JSON]
 sz=$(stat -c%s "$CA")
 curl "${AUTH[@]}" -X POST -H "Content-Type: application/octet-stream" \
   -H "Content-Range: 0-$((sz-1))/${sz}" --data-binary @"$CA" \
-  "$B/mgmt/shared/file-transfer/uploads/${WL_LDAP_CA_NAME}" -o /dev/null -w '    CA upload HTTP %{http_code}\n'
-if curl "${AUTH[@]}" "$B/mgmt/tm/sys/file/ssl-cert/${WL_LDAP_CA_NAME}" | jqok '.name'; then
-  req PATCH "$B/mgmt/tm/sys/file/ssl-cert/${WL_LDAP_CA_NAME}" \
-    "{\"sourcePath\":\"file:/var/config/rest/downloads/${WL_LDAP_CA_NAME}\"}" >/dev/null
+  "$B/mgmt/shared/file-transfer/uploads/${MFA_LDAP_CA_NAME}" -o /dev/null -w '    CA upload HTTP %{http_code}\n'
+if curl "${AUTH[@]}" "$B/mgmt/tm/sys/file/ssl-cert/${MFA_LDAP_CA_NAME}" | jqok '.name'; then
+  req PATCH "$B/mgmt/tm/sys/file/ssl-cert/${MFA_LDAP_CA_NAME}" \
+    "{\"sourcePath\":\"file:/var/config/rest/downloads/${MFA_LDAP_CA_NAME}\"}" >/dev/null
 else
   req POST "$B/mgmt/tm/sys/file/ssl-cert" \
-    "{\"name\":\"${WL_LDAP_CA_NAME}\",\"sourcePath\":\"file:/var/config/rest/downloads/${WL_LDAP_CA_NAME}\"}" >/dev/null
+    "{\"name\":\"${MFA_LDAP_CA_NAME}\",\"sourcePath\":\"file:/var/config/rest/downloads/${MFA_LDAP_CA_NAME}\"}" >/dev/null
 fi
 
 # 2. auth ldap system-auth — how the unit resolves a remote user and reads its groups.
 LDAP_BODY="$(jq -n \
-  --arg srv "${WL_LDAP_HOST}" --argjson port "${WL_LDAPS_PORT}" \
-  --arg ca "${WL_LDAP_CA_NAME}" --arg bdn "${WL_BIND_DN}" --arg bpw "${WL_BIND_PW}" \
-  --arg sbd "${WL_USER_SEARCH_BASE}" --arg la "${WL_LOGIN_ATTR}" \
+  --arg srv "${MFA_LDAP_HOST}" --argjson port "${MFA_LDAPS_PORT}" \
+  --arg ca "${MFA_LDAP_CA_NAME}" --arg bdn "${MFA_BIND_DN}" --arg bpw "${MFA_BIND_PW}" \
+  --arg sbd "${MFA_USER_SEARCH_BASE}" --arg la "${MFA_LOGIN_ATTR}" \
   '{name:"system-auth",servers:[$srv],port:$port,ssl:"enabled",
     sslCaCertFile:$ca,bindDn:$bdn,bindPw:$bpw,
     searchBaseDn:$sbd,loginAttribute:$la,
@@ -86,10 +86,10 @@ req PATCH "$B/mgmt/tm/auth/remote-user" \
   '{"defaultRole":"guest","remoteConsoleAccess":"disabled"}' >/dev/null
 
 # 4. the one rule: members of the admin group are elevated to administrator. This is alice.
-RR_BODY="$(jq -n --arg a "${WL_ADMIN_ROLE_ATTRIBUTE}" \
-  '{name:"warden_lite_admins",attribute:$a,role:"administrator",userPartition:"All",console:"tmsh",lineOrder:1}')"
-if curl "${AUTH[@]}" "$B/mgmt/tm/auth/remote-role/role-info/warden_lite_admins" | jqok '.name'; then
-  req PATCH "$B/mgmt/tm/auth/remote-role/role-info/warden_lite_admins" "$RR_BODY" >/dev/null
+RR_BODY="$(jq -n --arg a "${MFA_ADMIN_ROLE_ATTRIBUTE}" \
+  '{name:"bigip_mgt_mfa_admins",attribute:$a,role:"administrator",userPartition:"All",console:"tmsh",lineOrder:1}')"
+if curl "${AUTH[@]}" "$B/mgmt/tm/auth/remote-role/role-info/bigip_mgt_mfa_admins" | jqok '.name'; then
+  req PATCH "$B/mgmt/tm/auth/remote-role/role-info/bigip_mgt_mfa_admins" "$RR_BODY" >/dev/null
 else
   req POST  "$B/mgmt/tm/auth/remote-role/role-info" "$RR_BODY" >/dev/null
 fi
@@ -110,4 +110,4 @@ for attempt in 1 2 3 4 5; do
   sleep 6
 done
 [ "$saved" = 1 ] || echo "    WARNING: config is live but was not saved to disk on ${BIGIP_MGMT}" >&2
-echo "    ${BIGIP_MGMT}: remote auth -> ${WL_LDAP_HOST}, admins = ${WL_ADMIN_ROLE_ATTRIBUTE}"
+echo "    ${BIGIP_MGMT}: remote auth -> ${MFA_LDAP_HOST}, admins = ${MFA_ADMIN_ROLE_ATTRIBUTE}"

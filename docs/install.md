@@ -1,4 +1,4 @@
-# Install — the warden-lite stack
+# Install — the bigip-mgt-mfa stack
 
 Stand up the Docker half of the demo: the demo CA, CoreDNS, Keycloak, and (in bundled mode)
 OpenLDAP with the two demo principals. This half touches **no BIG-IP**, which is the point of
@@ -16,11 +16,11 @@ _Last validated: 2026-07-30_
   checks for all four and exits naming the missing one. `scripts/validate.sh` additionally uses
   `dig` (`dnsutils`) and `ldapsearch`/`ldapwhoami` (`ldap-utils`); `scripts/demo-login.sh`
   additionally needs `oathtool` to compute TOTP codes.
-- Free host ports, because the containers publish them: `${WL_KEYCLOAK_PORT}` (default `8443`)
-  for Keycloak, `389` and `636` for the bundled OpenLDAP, and `${WL_DNS_PORT}` (default `53`)
-  on `${WL_HOST_IP}` for CoreDNS. CoreDNS binds the host's lab address rather than the wildcard
+- Free host ports, because the containers publish them: `${MFA_KEYCLOAK_PORT}` (default `8443`)
+  for Keycloak, `389` and `636` for the bundled OpenLDAP, and `${MFA_DNS_PORT}` (default `53`)
+  on `${MFA_HOST_IP}` for CoreDNS. CoreDNS binds the host's lab address rather than the wildcard
   so it can coexist with a stub resolver on `127.0.0.53`; if something else already holds `:53`
-  on that address, move it with `WL_DNS_PORT`.
+  on that address, move it with `MFA_DNS_PORT`.
 - The BIG-IP pair must be able to reach this host on the LDAP/LDAPS, Keycloak and DNS ports
   above. Nothing in this half connects *to* a BIG-IP, but the addresses you choose here are the
   ones the appliances will use later.
@@ -30,8 +30,8 @@ _Last validated: 2026-07-30_
 ## Procedure
 ### 1. Configure
 `deploy.sh` refuses to start without a `.env`. Copy the example and fill in the
-`<angle-bracket>` values — `WL_HOST_IP`, the two passwords in the directory block, the Keycloak
-admin password and OIDC client secret, the `BIGIP_*` block, and `WL_APM_VIP`:
+`<angle-bracket>` values — `MFA_HOST_IP`, the two passwords in the directory block, the Keycloak
+admin password and OIDC client secret, the `BIGIP_*` block, and `MFA_APM_VIP`:
 
 ```bash
 cp .env.example .env
@@ -42,7 +42,7 @@ $EDITOR .env
 are resolved in `scripts/lib/directory.sh`, which is the single source of truth for the base
 DN, the bind account, the identity subtree and how admin-ness is expressed.
 
-In **external** directory mode (`WL_DIRECTORY_MODE=external`) warden-lite creates nothing in
+In **external** directory mode (`MFA_DIRECTORY_MODE=external`) bigip-mgt-mfa creates nothing in
 your directory and the deployer seeds nothing, so prove the bind, the subtree and the group
 expression before you go any further. `scripts/preflight-directory.sh` is read-only and touches
 no BIG-IP:
@@ -64,8 +64,8 @@ In order, it:
    [Idempotency in deploy.md](deploy.md#idempotency). Each SAN covers both the DNS name a
    browser uses and the IP address the BIG-IP uses, because every one of these endpoints is
    reached from both sides.
-2. **Renders the DNS zone** to `dns/Corefile` — CoreDNS is authoritative for `${WL_DOMAIN}` and
-   forwards everything else to `WL_DNS_UPSTREAM`.
+2. **Renders the DNS zone** to `dns/Corefile` — CoreDNS is authoritative for `${MFA_DOMAIN}` and
+   forwards everything else to `MFA_DNS_UPSTREAM`.
 3. **Renders the Keycloak realm** to `keycloak/import/` (`envsubst`, then `jq` strips the
    `_comment*` keys, which Keycloak's importer would reject rather than ignore). A rendering
    failure here is almost always an unset variable in `.env`.
@@ -87,8 +87,8 @@ or add the two demo names to its hosts file:
 ```bash
 # on the workstation, or on this host if you browse from it
 printf '%s\t%s\n%s\t%s\n' \
-  "${WL_HOST_IP}" "${WL_KEYCLOAK_FQDN}" \
-  "${WL_APM_VIP}" "${WL_WEBTOP_FQDN}" | sudo tee -a /etc/hosts
+  "${MFA_HOST_IP}" "${MFA_KEYCLOAK_FQDN}" \
+  "${MFA_APM_VIP}" "${MFA_WEBTOP_FQDN}" | sudo tee -a /etc/hosts
 ```
 
 Import `certs/ca.crt` into the browser or OS trust store as well. The webtop VIP is the OIDC
@@ -98,23 +98,23 @@ redirect rather than as a certificate warning.
 ## Verification
 ```bash
 docker compose --profile bundled ps
-dig +short "@${WL_HOST_IP}" -p "${WL_DNS_PORT:-53}" "${WL_KEYCLOAK_FQDN}"
-curl -sk --resolve "${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}:${WL_HOST_IP}" \
-  "https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}/realms/${WL_KEYCLOAK_REALM}/.well-known/openid-configuration" \
+dig +short "@${MFA_HOST_IP}" -p "${MFA_DNS_PORT:-53}" "${MFA_KEYCLOAK_FQDN}"
+curl -sk --resolve "${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}:${MFA_HOST_IP}" \
+  "https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}/realms/${MFA_KEYCLOAK_REALM}/.well-known/openid-configuration" \
   | jq -r .issuer
 ```
 
-Expected: `keycloak`, `warden-lite-dns` and `openldap` all `running`; the Keycloak FQDN resolves
-to `WL_HOST_IP`; the issuer is exactly
-`https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}/realms/${WL_KEYCLOAK_REALM}`. APM validates that
+Expected: `keycloak`, `bigip-mgt-mfa-dns` and `openldap` all `running`; the Keycloak FQDN resolves
+to `MFA_HOST_IP`; the issuer is exactly
+`https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}/realms/${MFA_KEYCLOAK_REALM}`. APM validates that
 string literally, so a mismatch here becomes an opaque token-validation failure later.
 
 Then confirm the one directory fact the whole demo rests on — alice is in the admin group and
 bob is not:
 
 ```bash
-ldapsearch -x -LLL -H "ldap://${WL_HOST_IP}:${WL_LDAP_PORT:-389}" \
-  -D "cn=bigip-bind,ou=svc,${BASE_DN}" -w "${WL_BIND_PW}" \
+ldapsearch -x -LLL -H "ldap://${MFA_HOST_IP}:${MFA_LDAP_PORT:-389}" \
+  -D "cn=bigip-bind,ou=svc,${BASE_DN}" -w "${MFA_BIND_PW}" \
   -b "ou=people,${BASE_DN}" '(uid=alice.admin)' memberOf
 ```
 
