@@ -11,7 +11,17 @@ access tier is [deploy.md](deploy.md).
 - A Linux host with Docker and the **`docker compose` v2 plugin** (`docker compose version`
   must work; the standalone `docker-compose` v1 binary is not enough).
 - `openssl`, `jq`, `envsubst` (in `gettext-base`), `curl`. For enrolment and testing also
-  `qrencode` and `oathtool`; for the validation script, `dig` and `ldap-utils`.
+  `qrencode` and `oathtool`; for the validation script, `dig` (in `dnsutils`) and
+  `ldap-utils`. On Ubuntu 24.04 that is:
+
+  ```bash
+  sudo apt-get install -y openssl jq gettext-base curl qrencode oathtool \
+                          dnsutils ldap-utils ca-certificates docker.io docker-compose-v2
+  sudo usermod -aG docker "$USER"    # then log out and back in, or use: sg docker -c '...'
+  ```
+
+  The group change does not affect your current shell. Running `./deploy.sh` before logging
+  out again fails on the Docker socket, which reads like a Docker problem and is not.
 - Free host ports: **53/udp and 53/tcp** for CoreDNS, and **389/636** for the bundled
   directory. Most Linux hosts already run a stub resolver on `127.0.0.53`, which is why
   CoreDNS binds `MFA_HOST_IP` rather than the wildcard.
