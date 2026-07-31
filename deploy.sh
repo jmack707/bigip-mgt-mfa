@@ -104,13 +104,23 @@ fi
 # ── the BIG-IP half ─────────────────────────────────────────────────────────
 if [ "$DO_BIGIP" = 1 ]; then
   : "${BIGIP_PASS:?set BIGIP_PASS in .env or export it}"
-  : "${BIGIP_A_MGMT:?set BIGIP_A_MGMT}"; : "${BIGIP_B_MGMT:?set BIGIP_B_MGMT}"
+  : "${BIGIP_A_MGMT:?set BIGIP_A_MGMT}"
 
-  say "system auth + remote-role on BOTH units"
+  # BIGIP_B_MGMT is OPTIONAL. An HA pair is the interesting demo, but most UDF blueprints and
+  # many personal labs give you a single BIG-IP, and there is nothing about MFA at the
+  # management edge that needs two. Leave it unset and everything below simply runs once.
+  UNITS=("$BIGIP_A_MGMT")
+  [ -n "${BIGIP_B_MGMT:-}" ] && UNITS+=("$BIGIP_B_MGMT")
+
+  if [ "${#UNITS[@]}" -eq 1 ]; then
+    say "system auth + remote-role (single unit — BIGIP_B_MGMT not set)"
+  else
+    say "system auth + remote-role on BOTH units"
+  fi
   # Per-unit: `auth ldap system-auth` and `auth source` are device-local and a config-sync
   # does NOT carry them to the peer. (`auth remote-role` does sync, but on its own it cannot
   # authenticate anyone.) Skipping B is the classic "works until failover" bug.
-  for unit in "$BIGIP_A_MGMT" "$BIGIP_B_MGMT"; do
+  for unit in "${UNITS[@]}"; do
     echo "  --- $unit ---"
     BIGIP_MGMT="$unit" bigip/system-auth.sh
   done

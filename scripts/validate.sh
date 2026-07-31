@@ -61,12 +61,16 @@ MEM=$(ldapsearch -x -LLL -H "$LDAP_URI" -D "${MFA_BIND_DN}" -w "${MFA_BIND_PW}" 
 # Note the data plane is independent: TMM keeps serving the webtop perfectly while restjavad
 # is down, so "REST unreachable" is not the same as "the demo is down". Check the VIP.
 A=(-sk -u "${BIGIP_USER}:${BIGIP_PASS:-}")
+# BIGIP_B_MGMT is optional -- a single-unit deployment is supported, so every per-unit check
+# iterates whatever is actually configured rather than assuming a pair.
+UNITS=("$BIGIP_A_MGMT")
+[ -n "${BIGIP_B_MGMT:-}" ] && UNITS+=("$BIGIP_B_MGMT")
 mgmt_up(){ # mgmt_up <address>
   curl "${A[@]}" -o /dev/null -m8 -w '%{http_code}' "https://$1/mgmt/tm/sys/version" 2>/dev/null | grep -q '^200$'
 }
 REST_DOWN=0
 if [ -n "${BIGIP_PASS:-}" ]; then
-  for u in "$BIGIP_A_MGMT" "$BIGIP_B_MGMT"; do
+  for u in "${UNITS[@]}"; do
     mgmt_up "$u" || { REST_DOWN=1; printf '  \033[33mSKIP\033[0m  %s iControl REST is not answering\n' "$u"; }
   done
 fi
@@ -83,7 +87,7 @@ if [ -z "${BIGIP_PASS:-}" ]; then
   skip "BIGIP_PASS not set — skipping BIG-IP checks"
 else
   A=(-sk -u "${BIGIP_USER}:${BIGIP_PASS}")
-  for unit in "${BIGIP_A_MGMT}" "${BIGIP_B_MGMT}"; do
+  for unit in "${UNITS[@]}"; do
     RR=$(curl "${A[@]}" -m8 "https://${unit}/mgmt/tm/auth/remote-role/role-info/bigip_mgt_mfa_admins" | jq -r '.attribute // empty')
     [ "$RR" = "${MFA_ADMIN_ROLE_ATTRIBUTE}" ] \
       && ok "$unit remote-role maps ${RR} -> administrator" \
@@ -96,8 +100,12 @@ else
   AP=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/profile/access/~Common~bigip-mgt-mfa" | jq -r '.name // empty')
   [ -n "$AP" ] && ok "access profile bigip-mgt-mfa present on A" || bad "access profile missing on A"
   # Synced, not just built: the peer must carry the policy or a failover loses the webtop.
-  APB=$(curl "${A[@]}" -m8 "https://${BIGIP_B_MGMT}/mgmt/tm/apm/profile/access/~Common~bigip-mgt-mfa" | jq -r '.name // empty')
-  [ -n "$APB" ] && ok "access profile synced to B" || bad "access profile NOT on B — run a config-sync"
+  if [ -n "${BIGIP_B_MGMT:-}" ]; then
+    APB=$(curl "${A[@]}" -m8 "https://${BIGIP_B_MGMT}/mgmt/tm/apm/profile/access/~Common~bigip-mgt-mfa" | jq -r '.name // empty')
+    [ -n "$APB" ] && ok "access profile synced to B" || bad "access profile NOT on B — run a config-sync"
+  else
+    skip "peer sync — single-unit deployment (BIGIP_B_MGMT unset)"
+  fi
   RES_N=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/resource/portal-access" | jq -r '[.items[]?|select(.name|startswith("bigip-mgt-mfa-bigip"))]|length')
   [ "${RES_N:-0}" = 2 ] && ok "two portal resources (one per unit)" || bad "expected 2 portal resources, found ${RES_N:-0}"
   # A portal resource can exist, publish and rewrite perfectly while carrying NO SSO
@@ -131,7 +139,7 @@ else
       -d "{\"command\":\"run\",\"utilCmdArgs\":\"-c \\\"grep pam_audit /var/log/secure | grep ${2} | tail -1\\\"\"}" \
       | jq -r '.commandResult // ""' | grep -oE 'level=[A-Za-z]+' | tail -1 | cut -d= -f2
   }
-  for unit in "${BIGIP_A_MGMT}" "${BIGIP_B_MGMT}"; do
+  for unit in "${UNITS[@]}"; do
     R=$(probe_role "$unit" alice.admin)
     [ "$R" = Administrator ] && ok "$unit: alice.admin -> Administrator" \
       || bad "$unit: alice.admin got '${R:-unknown}', expected Administrator (is checkRolesGroup enabled?)"
@@ -150,6 +158,60 @@ case "$CODE" in
   000)     bad "VIP ${MFA_APM_VIP} unreachable from this host (routing, or run this from a host on that network)";;
   *)       bad "VIP answered HTTP $CODE";;
 esac
+
+# ── single sign-on, tested by BEHAVIOUR ─────────────────────────────────────
+# The checks above assert that SSO is CONFIGURED. That is not the same claim, and the
+# difference is not academic: this suite once reported everything green while clicking a
+# webtop tile landed on the TMUI login form. Configuration checks cannot catch a wrong form
+# action, a missing CSRF header, or an empty credential -- only driving the thing can.
+#
+# So: log in for real, open a portal resource, and assert that what comes back is the TMUI
+# application rather than its login page.
+sect "single sign-on (behaviour, not configuration)"
+if [ -z "${MFA_TEST_USER_PW:-}" ] || [ ! -s "${HERE}/../certs/totp-seeds.env" ]; then
+  skip "no demo credentials or TOTP seeds — cannot drive a real login"
+elif ! command -v oathtool >/dev/null 2>&1; then
+  skip "oathtool not installed — cannot generate a one-time code"
+else
+  SSO_USER="${MFA_SSO_TEST_USER:-alice.admin}"
+  SEED=$(grep "^${SSO_USER}=" "${HERE}/../certs/totp-seeds.env" | cut -d= -f2)
+  if [ -z "$SEED" ]; then
+    skip "${SSO_USER} has no enrolled token — run scripts/enroll-totp.sh"
+  else
+    JAR=$(mktemp)
+    C=(-sk -c "$JAR" -b "$JAR" --resolve "${MFA_WEBTOP_FQDN}:443:${MFA_APM_VIP}")
+    OTP=$(oathtool --totp -b --time-step-size="${MFA_TOTP_PERIOD:-60}s" "$SEED")
+    curl "${C[@]}" -o /dev/null -m10 "https://${MFA_WEBTOP_FQDN}/" 2>/dev/null
+    curl "${C[@]}" -L -o /dev/null -m10 "https://${MFA_WEBTOP_FQDN}/my.policy" 2>/dev/null
+    PAGE=$(curl "${C[@]}" -L -m20 -d "username=${SSO_USER}" \
+             --data-urlencode "password=${MFA_TEST_USER_PW}" \
+             -d "otp=${OTP}" -d vhost=standard \
+             "https://${MFA_WEBTOP_FQDN}/my.policy" 2>/dev/null)
+    if ! grep -q '"webtop"' <<<"$PAGE"; then
+      bad "${SSO_USER} could not reach the webtop — MFA login failed, so SSO is untestable"
+    else
+      ok "${SSO_USER} reached the webtop"
+      # Follow the published portal resource and look at what TMUI actually returns. A login
+      # form here means the credential was never injected -- the exact failure that
+      # configuration checks sail straight past.
+      LINK=$(curl "${C[@]}" -s -m15 "https://${MFA_WEBTOP_FQDN}/vdesk/webtop.eui?webtop=/Common/${P:-bigip-mgt-mfa}-webtop" 2>/dev/null \
+             | grep -oE '/f5-w-[A-Za-z0-9%]+\$\$/?' | head -1)
+      if [ -z "$LINK" ]; then
+        skip "could not find a rewritten portal link on the webtop to follow"
+      else
+        APP=$(curl "${C[@]}" -L -m20 "https://${MFA_WEBTOP_FQDN}${LINK}" 2>/dev/null)
+        if grep -qiE 'name="passwd"|loginform|Log in with your username' <<<"$APP"; then
+          bad "portal opened TMUI's LOGIN FORM — single sign-on is not injecting the credential"
+        elif grep -qiE 'Configuration Utility|tmui|Main.*Statistics' <<<"$APP"; then
+          ok "portal opened TMUI already authenticated (no login form)"
+        else
+          skip "portal returned an unrecognised page — inspect by hand"
+        fi
+      fi
+    fi
+    rm -f "$JAR"
+  fi
+fi
 
 printf '\n%s\n' "$([ "$FAIL" = 0 ] && printf '\033[32mall checks passed\033[0m' || printf "\033[31m${FAIL} check(s) failed\033[0m")"
 exit "$FAIL"

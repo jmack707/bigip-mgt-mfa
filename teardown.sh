@@ -42,7 +42,10 @@ say(){ printf '\n\033[36m==> %s\033[0m\n' "$*"; }
 if [ "$DO_BIGIP" = 1 ]; then
   : "${BIGIP_PASS:?set BIGIP_PASS}"
   P=bigip-mgt-mfa; PART=Common
-  for unit in "${BIGIP_A_MGMT}" "${BIGIP_B_MGMT}"; do
+  # BIGIP_B_MGMT is optional; tear down whatever is configured.
+  TD_UNITS=("${BIGIP_A_MGMT}")
+  [ -n "${BIGIP_B_MGMT:-}" ] && TD_UNITS+=("${BIGIP_B_MGMT}")
+  for unit in "${TD_UNITS[@]}"; do
     say "restoring local authentication on ${unit}"
     # First, so that a failure later cannot leave the unit pointed at a directory that is
     # about to disappear. admin and root are local accounts, so this cannot lock anyone out.
