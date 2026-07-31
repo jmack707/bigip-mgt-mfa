@@ -273,7 +273,7 @@ Not entry points. They are sourced by the scripts above and do nothing on their 
 | File | Provides |
 |---|---|
 | `scripts/lib/certs.sh` | `ensure_certs_writable`, which reclaims `certs/` after the OpenLDAP container has chowned it |
-| `bigip/lib/objects.sh` | `wl_apm_objects <prefix> <partition>`, the ordered list of mutable APM objects — policy and profile first, then the items they reference, or TMOS refuses the delete as in use |
+| `bigip/lib/objects.sh` | `mfa_apm_objects <prefix> <partition>`, the ordered list of mutable APM objects — policy and profile first, then the items they reference, or TMOS refuses the delete as in use |
 
 Source them after `.env`, never before: each is written to fill in defaults around values
 that `.env` has already set.
