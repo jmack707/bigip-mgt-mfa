@@ -11,6 +11,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 set -a; . "${HERE}/../.env"; set +a
 # shellcheck disable=SC1091
 . "${HERE}/lib/directory.sh"
+# certs/ is gitignored, so a FRESH CLONE does not have it. Create it rather than assuming --
+# without this the very first `./deploy.sh --stack` on a new machine dies at
+# `cd: .../certs: No such file or directory`, which is a poor first impression.
+mkdir -p "${HERE}/../certs"
 cd "${HERE}/../certs"
 
 # shellcheck disable=SC1091
