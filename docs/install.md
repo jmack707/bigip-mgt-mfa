@@ -146,7 +146,6 @@ of any cached `certs/.totp-*` secrets.
 `--volumes` **destroys every enrolled TOTP secret**, because Keycloak's H2 store lives in the
 `kcdata` volume. Users re-enrol on their next login; if you only want to reset one user, leave
 the volumes alone and use
-[operations/runbooks/reset-user-mfa.md](operations/runbooks/reset-user-mfa.md). Without
 `--volumes`, re-running `./deploy.sh --stack` restores the same directory and the same
 enrolments.
 

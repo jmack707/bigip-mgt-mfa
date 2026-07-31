@@ -166,7 +166,6 @@ is in [deploy.md](deploy.md#rollback).
 `--volumes` drops `kcdata`, and with it **every enrolled TOTP secret**, along with the cached
 `certs/.totp-*` files. That is the intended behaviour for a demo you rebuild, but it is not
 recoverable — to reset a single user instead, use
-[operations/runbooks/reset-user-mfa.md](operations/runbooks/reset-user-mfa.md).
 
 To remove the generated material as well, which discards the CA:
 
