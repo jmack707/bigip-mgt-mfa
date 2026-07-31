@@ -10,7 +10,6 @@ _Last validated: 2026-07._
 ## Overview
 `.env` is the only file you edit. Copy [`.env.example`](../../.env.example) to `.env` — the
 copy is gitignored — fill in the angle-bracket values, and every other artefact is rendered
-from it: the CoreDNS zone, the Keycloak realm, the LDIF seeds, the BIG-IP objects. Nothing
 in the repo hardcodes a DN, a port or an address.
 
 Three rules make the rest of this page readable:
@@ -23,7 +22,6 @@ Three rules make the rest of this page readable:
   `MFA_BIND_DN`, `MFA_USER_SEARCH_BASE`, `MFA_LOGIN_ATTR` and `MFA_DEVICE_GROUP` ship empty on
   purpose: empty means "derive it", and the derivation lives in one place
   ([`scripts/lib/directory.sh`](../../scripts/lib/directory.sh)) so a value set once is
-  consistent across APM, the BIG-IP's system authentication, Keycloak federation and the
   validator.
 - **`.env` is sourced with `set -a`**, so every key becomes an exported environment
   variable. That is what lets `envsubst` render the templates, and it is also why an
@@ -33,11 +31,9 @@ Three rules make the rest of this page readable:
 ## This host
 | Variable | Default | Meaning |
 |---|---|---|
-| `MFA_HOST_IP` | _(required, no default)_ | IPv4 of the Docker host running Keycloak, CoreDNS and — in bundled mode — OpenLDAP, **as the BIG-IP reaches it** |
 
 `MFA_HOST_IP` is the single most load-bearing value in the file, because three different
 consumers resolve to it and two of them fail closed on a mismatch. It becomes an `IP:` SAN
-on the Keycloak certificate and on the bundled LDAPS certificate
 ([`scripts/gen-certs.sh`](../../scripts/gen-certs.sh)); it is the address CoreDNS binds its
 UDP and TCP listeners to rather than the wildcard, because most Linux hosts already run a
 stub resolver on `127.0.0.53` and binding `0.0.0.0` collides with it; and it is the
@@ -46,7 +42,6 @@ the appliances can route to, never to `127.0.0.1`.
 
 If you change it after a deployment, re-run `scripts/gen-certs.sh` with `MFA_REGEN_CA` unset
 (the leaf certificates are reissued, the CA is kept) and then `./deploy.sh --bigip`, or the
-BIG-IP's back-channel call to Keycloak fails validation on the SAN — which surfaces as an
 opaque APM error rather than as a certificate warning
 ([troubleshooting.md](../operations/troubleshooting.md)).
 
@@ -57,15 +52,28 @@ opaque APM error rather than as a certificate warning
 | `MFA_DOMAIN` | `bigip-mgt-mfa.lab` | LDAP domain. In bundled mode it sets the OpenLDAP container's suffix and hostname, the LDAPS certificate CN and SAN, and the zone CoreDNS is authoritative for |
 | `BASE_DN` | `dc=bigip-mgt-mfa,dc=lab` | Directory base DN. Must correspond to `MFA_DOMAIN`; every derived DN below is built from it |
 | `MFA_LDAP_ADMIN_PW` | _(required in bundled mode)_ | `cn=admin,${BASE_DN}` password for the bundled OpenLDAP. Used by the container and by the seeding `ldapadd` calls in `deploy.sh`. Ignored in external mode |
-| `MFA_BIND_PW` | _(required)_ | Password for the read-only search bind. Consumed by APM's AAA LDAP object, the BIG-IP's `auth ldap system-auth`, Keycloak's federation provider and `scripts/validate.sh` |
 
 The two modes are a configuration change, not a different design. In both, the interaction
 with the directory is: bind to search, bind as the user to verify a password, read
-`memberOf`. Keycloak federates the same subtree with `editMode: READ_ONLY`. Nothing writes,
 which is what makes it safe to aim `external` mode at a production AD.
 
 `MFA_DIRECTORY_MODE` is validated where it is read — an unrecognised value aborts before any
 container starts or any REST call is made.
+
+### `MFA_BIND_PW`
+Type: string. Default: none. Required: **yes**.
+
+Password for the read-only search account named by `MFA_BIND_DN`. APM binds with it to find
+the user before authenticating them, so a wrong value fails every login at the LDAP step with
+`Failed to bind ... Invalid credentials` — naming the bind DN, not the user's, which is
+easy to misread as the user's password being wrong.
+
+In bundled mode this is the password the seeding scripts set on the account they create. With
+an external directory it must match what your directory administrator issued.
+
+Note that `apm aaa ldap` is created, not modified, on a re-run: changing this value takes
+effect because the build deletes and recreates the AAA object. Earlier revisions did not, and
+a stale bind DN survived a domain change with no indication anything was wrong.
 
 ## The BIG-IP admin group
 | Variable | Default | Meaning |
@@ -74,7 +82,6 @@ container starts or any REST call is made.
 | `MFA_ADMIN_ROLE_ATTRIBUTE` | `memberOf=${MFA_ADMIN_GROUP_DN}` | The `<attribute>=<value>` pair the BIG-IP's remote-role rule matches to elevate a user |
 
 This pair is the entire authorization story, and it is evaluated by the target BIG-IP, not
-by APM and not by Keycloak ([ADR 0003](../adr/0003-authorization-on-remote-role.md)). `bigip/system-auth.sh` writes exactly one remote-role rule,
 `bigip_mgt_mfa_admins`, with `attribute` set to `MFA_ADMIN_ROLE_ATTRIBUTE` and `role` set to
 `administrator`. Everyone who authenticates and matches no rule falls through to
 `remote-user defaultRole: guest` with remote console access disabled. Nothing about the
@@ -100,13 +107,10 @@ default column.
 | Variable | Default | Meaning |
 |---|---|---|
 | `MFA_LDAP_HOST` | bundled: `${MFA_HOST_IP}` | Address of the AD domain controller or LDAP server. Required in external mode |
-| `MFA_LDAP_PORT` | `389` | Plain LDAP port. Used by APM's AAA server pool and by Keycloak's federation connection URL |
 | `MFA_LDAPS_PORT` | `636` | LDAPS port. Used only by the BIG-IP's own system authentication, which is TLS-only |
-| `MFA_LDAP_SCHEMA` | `openldap` | `openldap` or `ad`. Selects the login attribute and the Keycloak federation vendor, UUID attribute and user object classes |
 | `MFA_LDAP_CA_FILE` | bundled: `certs/ca.crt` | PEM of the CA that issued your LDAPS certificate. Required in external mode; a relative path is resolved against the repo root |
 | `MFA_BIND_DN` | `cn=bigip-bind,ou=svc,${BASE_DN}` | Read-only search bind. It never needs write access and never needs to read `userPassword`, because passwords are verified by BIND rather than by comparison |
 | `MFA_USER_SEARCH_BASE` | `ou=people,${BASE_DN}` | Subtree identities are searched in |
-| `MFA_LOGIN_ATTR` | `uid`, or `sAMAccountName` when `MFA_LDAP_SCHEMA=ad` | Attribute a submitted username is matched against. Also the RDN and username attribute of the Keycloak federation mapper |
 
 `MFA_LDAP_PORT` and `MFA_LDAPS_PORT` are both live in bundled mode too, despite the block
 heading in `.env.example`: APM queries the directory over `MFA_LDAP_PORT` and the BIG-IP's
@@ -119,8 +123,6 @@ fill in for an external directory, not the only place the keys are read.
 | `MFA_DNS_PORT` | `53` | Host port CoreDNS binds on `MFA_HOST_IP`, UDP and TCP. Change it if something already owns `:53` |
 | `MFA_DNS_UPSTREAM` | `1.1.1.1` | Where names outside the demo zone are forwarded |
 
-A DNS server is part of this stack for one reason: the BIG-IP's APM OAuth client resolves
-the Keycloak FQDN through a TMOS `net dns-resolver`, which performs its own lookups inside
 TMM and does **not** read the BIG-IP's `/etc/hosts`. A hosts-file entry can cover the
 browser; it can never cover the BIG-IP. Rather than make the demo depend on a DNS server you
 may not be permitted to edit, bigip-mgt-mfa ships CoreDNS, authoritative for `MFA_DOMAIN` and
@@ -128,37 +130,8 @@ forwarding everything else to `MFA_DNS_UPSTREAM`, and `bigip/apm-build.sh` creat
 forward-zone resolver pointing at `${MFA_HOST_IP}:${MFA_DNS_PORT}`.
 
 The zone is rendered from [`dns/Corefile.tmpl`](../../dns/Corefile.tmpl) and holds exactly
-two records: `MFA_KEYCLOAK_FQDN` to `MFA_HOST_IP`, and `MFA_WEBTOP_FQDN` to `MFA_APM_VIP`.
 Pointing a workstation at this resolver as well is safe — non-demo names are forwarded — and
 it removes the browser hosts-file step entirely.
-
-## Keycloak
-| Variable | Default | Meaning |
-|---|---|---|
-| `MFA_KEYCLOAK_FQDN` | `keycloak.bigip-mgt-mfa.lab` | Name Keycloak is published under. Must resolve identically for the browser and for the BIG-IP |
-| `MFA_KEYCLOAK_PORT` | `8443` | Host port mapped to the container's HTTPS listener |
-| `MFA_KEYCLOAK_REALM` | `bigip-mgt-mfa` | Realm name, and therefore the last path element of the issuer |
-| `MFA_KEYCLOAK_ADMIN` | `admin` | Bootstrap administrator of the master realm |
-| `MFA_KEYCLOAK_ADMIN_PW` | _(required)_ | That administrator's password. Console access only; it is not part of the login flow |
-| `MFA_OIDC_CLIENT_ID` | `bigip-apm` | Confidential OIDC client the APM OAuth server presents |
-| `MFA_OIDC_CLIENT_SECRET` | _(required)_ | Shared between the Keycloak client definition and the APM OAuth server object. The two are rendered from the same variable, so they cannot drift |
-
-`MFA_KEYCLOAK_FQDN` and `MFA_KEYCLOAK_PORT` together become `KC_HOSTNAME`, which pins the
-issuer to `https://<fqdn>:<port>` rather than letting it float with the request `Host`
-header. That matters because APM validates the `iss` claim in the returned token against
-exactly the provider URIs it was built with, and a mismatch surfaces as a generic token
-failure that names neither the issuer nor the mismatch. `scripts/validate.sh` therefore
-compares the discovered issuer against `https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}/realms/${MFA_KEYCLOAK_REALM}`
-directly, and `deploy.sh` refuses to finish the stack half until the discovery document
-publishes an issuer at all.
-
-The realm is a second-factor oracle, not a general identity provider: its browser flow is
-Username Form followed by OTP Form, with no password step, because APM has already proven
-the password against the directory before it redirects ([ADR
-0002](../adr/0002-verify-totp-on-the-bigip.md)). `CONFIGURE_TOTP` is a default required
-action, so the first login for each user enrols an authenticator. Keycloak runs in
-development mode with an H2 store persisted in a volume, which is what keeps enrolments
-across a restart ([ADR 0004](../adr/0002-verify-totp-on-the-bigip.md)).
 
 ## The BIG-IP HA pair
 | Variable | Default | Meaning |
@@ -190,15 +163,11 @@ around each call to `bigip/system-auth.sh`, and it defaults to `BIGIP_A_MGMT` in
 | Variable | Default | Meaning |
 |---|---|---|
 | `MFA_APM_VIP` | _(required)_ | Address of the webtop virtual server. Browsers reach the demo at `https://<vip>/` |
-| `MFA_WEBTOP_FQDN` | `webtop.bigip-mgt-mfa.lab` | Name on the VIP certificate and the origin of the OIDC `redirect_uri` |
 | `MFA_APM_TRAFFIC_GROUP` | `traffic-group-1` | Intended traffic group for the floating VIP |
 | `MFA_SHADOW_A` | `192.0.2.5` | RFC 5737 TEST-NET façade in front of unit A's TMUI |
 | `MFA_SHADOW_B` | `192.0.2.6` | Façade in front of unit B's TMUI |
 
 `MFA_WEBTOP_FQDN` appears in three places that must agree: the SAN on the VIP certificate,
-the `redirectUris` and `webOrigins` of the Keycloak client, and the `redirectionUri`
-(`https://<fqdn>/oauth/client/redirect`) on the APM OAuth agent. All three are rendered from
-this one variable. The Keycloak client also accepts the raw `MFA_APM_VIP` origin, so a
 browser that reaches the VIP by address still completes the redirect.
 
 `MFA_SHADOW_A` and `MFA_SHADOW_B` exist because APM Portal Access refuses "reserved" targets —
@@ -257,19 +226,13 @@ one is written with a `${VAR:-default}` fallback.
 | `MFA_REGEN_CA` | `0` | Set to `1` to mint a **new** demo CA instead of reusing the existing one. Invalidates every browser trust import and both BIG-IP anchors |
 | `MFA_CA_CN` | `bigip-mgt-mfa Demo CA` | Subject CN of the generated CA |
 | `MFA_LDAP_CA_NAME` | bundled `bigip-mgt-mfa-ca.crt`, external `bigip-mgt-mfa-dir-ca.crt` | Object name the directory CA is installed under on each BIG-IP |
-| `MFA_KC_LDAP_HOST` | bundled `openldap`, external `${MFA_LDAP_HOST}` | Host in Keycloak's federation connection URL. Bundled Keycloak reaches OpenLDAP by compose service name over the container network |
-| `MFA_KC_LDAP_VENDOR` | `other`, or `ad` when `MFA_LDAP_SCHEMA=ad` | Keycloak federation vendor |
-| `MFA_KC_LDAP_UUID_ATTR` | `entryUUID`, or `objectGUID` when schema is `ad` | Immutable identifier attribute Keycloak keys users on |
-| `MFA_KC_LDAP_USER_CLASSES` | `inetOrgPerson, organizationalPerson`, or `person, organizationalPerson, user` when schema is `ad` | Object classes Keycloak's federation filter accepts |
 
-Getting the last three wrong makes Keycloak import zero users with no useful error, which is
 why they are derived from `MFA_LDAP_SCHEMA` rather than left to be set by hand.
 
 ## Where the values land
 | Rendered artefact | Source template | Rendered by |
 |---|---|---|
 | `dns/Corefile` | [`dns/Corefile.tmpl`](../../dns/Corefile.tmpl) | `deploy.sh --stack`, via `envsubst` |
-| `certs/ca.crt`, `certs/keycloak.*`, `certs/webtop.*`, `certs/ldap.*` | — | [`scripts/gen-certs.sh`](../../scripts/gen-certs.sh) |
 | Directory entries | [`ldap/seed.ldif`](../../ldap/seed.ldif), [`ldap/demo-users.ldif`](../../ldap/demo-users.ldif), [`ldap/acl-bigip-bind.ldif`](../../ldap/acl-bigip-bind.ldif) | `deploy.sh --stack` in bundled mode only |
 | BIG-IP objects under `/Common`, prefix `bigip-mgt-mfa` | — | [`bigip/system-auth.sh`](../../bigip/system-auth.sh) and [`bigip/apm-build.sh`](../../bigip/apm-build.sh) |
 
@@ -285,7 +248,6 @@ output of [cli.md](cli.md)'s validator.
 | Access profile and policy | `bigip-mgt-mfa` |
 | Webtop virtual server | `bigip-mgt-mfa-vs` on `${MFA_APM_VIP}:443` |
 | AAA LDAP server and its pool | `bigip-mgt-mfa-ldap-aaa`, `bigip-mgt-mfa-ldap-aaa-pool` |
-| OAuth provider, server, request objects | `bigip-mgt-mfa-keycloak`, `bigip-mgt-mfa-oauth-server`, `bigip-mgt-mfa-auth-redirect`, `bigip-mgt-mfa-token-by-code`, `bigip-mgt-mfa-token-refresh` |
 | DNS resolver | `bigip-mgt-mfa-resolver` |
 | Shadow façades | `bigip-mgt-mfa-shadow-a-vs` / `-b-vs`, with iRules `bigip-mgt-mfa-shadow-a-node` / `-b-node` |
 | Portal Access resources | `bigip-mgt-mfa-bigip-a-tmui`, `bigip-mgt-mfa-bigip-b-tmui` |

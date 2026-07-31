@@ -66,30 +66,11 @@ else
   MFA_LDAP_CA_NAME="${MFA_LDAP_CA_NAME:-bigip-mgt-mfa-dir-ca.crt}"
 fi
 
-# ─── Keycloak's view of the same directory ───────────────────────────────────
-# Bundled: Keycloak reaches OpenLDAP over the compose network by service name. External: over
-# the wire to your DC. Vendor/UUID/objectClass differ between AD and everything else, and
-# getting them wrong makes federation import zero users with no useful error.
-if mfa_is_bundled; then
-  MFA_KC_LDAP_HOST="${MFA_KC_LDAP_HOST:-openldap}"
-else
-  MFA_KC_LDAP_HOST="${MFA_KC_LDAP_HOST:-${MFA_LDAP_HOST}}"
-fi
-if [ "$MFA_LDAP_SCHEMA" = ad ]; then
-  MFA_KC_LDAP_VENDOR="${MFA_KC_LDAP_VENDOR:-ad}"
-  MFA_KC_LDAP_UUID_ATTR="${MFA_KC_LDAP_UUID_ATTR:-objectGUID}"
-  MFA_KC_LDAP_USER_CLASSES="${MFA_KC_LDAP_USER_CLASSES:-person, organizationalPerson, user}"
-else
-  MFA_KC_LDAP_VENDOR="${MFA_KC_LDAP_VENDOR:-other}"
-  MFA_KC_LDAP_UUID_ATTR="${MFA_KC_LDAP_UUID_ATTR:-entryUUID}"
-  MFA_KC_LDAP_USER_CLASSES="${MFA_KC_LDAP_USER_CLASSES:-inetOrgPerson, organizationalPerson}"
-fi
 
 export MFA_DIRECTORY_MODE MFA_LDAP_HOST MFA_LDAP_PORT MFA_LDAPS_PORT MFA_LDAP_SCHEMA \
        MFA_BIND_DN MFA_USER_SEARCH_BASE MFA_LOGIN_ATTR \
        MFA_ADMIN_GROUP_DN MFA_ADMIN_ROLE_ATTRIBUTE \
-       MFA_LDAP_CA_FILE MFA_LDAP_CA_NAME \
-       MFA_KC_LDAP_HOST MFA_KC_LDAP_VENDOR MFA_KC_LDAP_UUID_ATTR MFA_KC_LDAP_USER_CLASSES
+       MFA_LDAP_CA_FILE MFA_LDAP_CA_NAME
 
 mfa_directory_summary() {
   echo "directory: ${MFA_DIRECTORY_MODE} @ ${MFA_LDAP_HOST} — identities under ${MFA_USER_SEARCH_BASE}"
