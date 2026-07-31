@@ -11,6 +11,7 @@ services:
     # See docs/adr/0004-keycloak-dev-mode.md.
     image: quay.io/keycloak/keycloak:26.4
     container_name: keycloak
+    restart: unless-stopped
     command: start-dev --import-realm
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: "${WL_KEYCLOAK_ADMIN:-admin}"
@@ -40,6 +41,7 @@ services:
     # hosts-file step disappears entirely.
     image: docker.io/coredns/coredns:1.12.0
     container_name: warden-lite-dns
+    restart: unless-stopped
     command: -conf /etc/coredns/Corefile
     # Bound to the host's lab address rather than 0.0.0.0 on purpose: most Linux hosts
     # already run a stub resolver (systemd-resolved on 127.0.0.53), and binding the wildcard
@@ -58,6 +60,7 @@ services:
     profiles: ["bundled"]
     image: osixia/openldap:1.5.0
     container_name: openldap
+    restart: unless-stopped
     hostname: openldap.${WL_DOMAIN:-warden-lite.lab}
     ports: ["389:389", "636:636"]
     environment:
@@ -70,7 +73,9 @@ services:
       LDAP_TLS_CA_CRT_FILENAME: "ca.crt"
       LDAP_TLS_VERIFY_CLIENT: "never"
     volumes:
-      - ./certs:/container/service/slapd/assets/certs      # NOT :ro — osixia chowns this dir on startup
+      # Its OWN directory, not the shared certs/: osixia chowns this at every start, and
+      # sharing it eventually makes keycloak.key unreadable by Keycloak. NOT :ro.
+      - ./ldap-certs:/container/service/slapd/assets/certs
       - ldapdata:/var/lib/ldap
       - ldapconf:/etc/ldap/slapd.d
 

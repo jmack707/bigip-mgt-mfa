@@ -75,6 +75,16 @@ fi
 issue ldap "openldap.${WL_DOMAIN:-warden-lite.lab}" \
   "DNS:openldap.${WL_DOMAIN:-warden-lite.lab},DNS:openldap,IP:${WL_HOST_IP}"
 
+# OpenLDAP gets its OWN copy of what it needs, in its own directory. The osixia image
+# chowns whatever certs directory it is handed, on every start -- sharing one directory
+# means it eventually owns keycloak.key too, and Keycloak then dies on restart with
+# AccessDeniedException. Start ordering hides this until something reboots.
+mkdir -p ldap-certs
+cp -f ldap.crt ldap.key ca.crt ldap-certs/
+chmod 0644 ldap-certs/ldap.crt ldap-certs/ca.crt
+chmod 0640 ldap-certs/ldap.key || true
+echo "==> ldap-certs/ populated (kept apart so the container cannot chown the rest)"
+
 # Marker consumed by deploy.sh: the containers must be restarted to pick up new certs.
 # An if, not `[ ] && touch`, because under `set -e` a false test would abort the script.
 if [ "$REISSUED" = 1 ]; then touch .reissued; else rm -f .reissued; fi
