@@ -98,7 +98,7 @@ scripts/demo-login.sh bob.user
 ./scripts/validate.sh; echo "failed checks: $?"
 ```
 
-Expected: both users complete password → LDAP → Keycloak TOTP → webtop with both TMUI resources
+Expected: both users complete password → LDAP → the directory TOTP → webtop with both TMUI resources
 on the session, and `validate.sh` exits `0`.
 
 Then assert the authorization outcome **on the newly-active unit specifically** — this is the

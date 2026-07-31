@@ -11,41 +11,20 @@ most problems to a component in one run.
 
 | Symptom | Likely cause | Section |
 |---|---|---|
-| Every login is denied, even with a correct password | Tcl syntax error in a policy branch | [Deny after a successful OIDC exchange](#deny-after-a-successful-oidc-exchange) |
 | Read-only user gets HTTP 401 from `curl` | Correct behaviour — Guest has no REST access | [A read-only user returns 401](#a-read-only-user-returns-401) |
 | Everyone lands read-only, including the admin | `check-roles-group` disabled | [Nobody gets elevated](#nobody-gets-elevated) |
 | Admin works, read-only user is rejected outright | Roles evaluated but stale auth cache | [Rapid user switching returns 401](#rapid-user-switching-returns-401) |
 | Works until failover, then everyone is read-only | Auth configured on one unit only | [Failover loses authorization](#failover-loses-authorization) |
-| Keycloak container exits at startup | Unknown field in the realm import | [Keycloak refuses the realm](#keycloak-refuses-the-realm) |
-| OAuth step fails or the BIG-IP cannot reach Keycloak | Name resolution on the appliance | [The BIG-IP cannot resolve Keycloak](#the-big-ip-cannot-resolve-keycloak) |
 | CoreDNS will not start, port in use | systemd-resolved holds :53 | [CoreDNS cannot bind port 53](#coredns-cannot-bind-port-53) |
 | Nobody is in the admin group | Overlay applied after the group | [memberOf is empty](#memberof-is-empty) |
 | Webtop appears empty in a scripted check | Resources load asynchronously | [The webtop shows no resources](#the-webtop-shows-no-resources) |
-| `scope=openid openid` on the authorization request | Scope set in two places | [Duplicated OAuth scope](#duplicated-oauth-scope) |
+| Every code rejected, everyone, at once | Clock drift on the appliance | [Every code is rejected, for everyone, all at once](#every-code-is-rejected-for-everyone-all-at-once) |
+| One user's codes rejected | Enrolled but not deployed, or period mismatch | [One user's codes are rejected](#one-users-codes-are-rejected) |
+| New user cannot log in at all | No seed — denial, not a skipped factor | [A brand-new user cannot log in at all](#a-brand-new-user-cannot-log-in-at-all) |
+| Login denied, log names the bind account | Stale AAA object | [Every login is denied and the log blames the bind account](#every-login-is-denied-and-the-log-blames-the-bind-account) |
+| Webtop opens TMUI's login form | SSO not injecting the credential | [The webtop opens TMUI's login form](#the-webtop-opens-tmuis-login-form) |
+| REST 401/502, demo still serving | restjavad wedged — data plane unaffected | [iControl REST stops answering](#icontrol-rest-stops-answering) |
 | Portal resource fails with errorcode 17 | Reserved target address | [Portal access refuses the target](#portal-access-refuses-the-target) |
-
-## Deny after a successful OIDC exchange
-`/var/log/apm` shows `OAuth Client: succeeded ... using 'authorization_code' grant type` and
-then, immediately after, `Access policy result: Logon_Deny`. Nearby:
-
-```text
-Rule evaluation failed with error: syntax error in expression
-"[mcget {session.oauth.client.last.errMsg}] == ": premature end of expression
-```
-
-The authentication worked; the branch that evaluates it did not. An empty double-quoted
-string literal (`== ""`) does not survive being written through iControl REST into the stored
-rule — what lands on the appliance is `== ` followed by nothing, which is invalid Tcl. The
-branch throws, the policy takes `fallback`, and every correct login is denied.
-
-Use braces, which carry an empty string through intact:
-
-```text
-expr {[mcget {session.oauth.client.last.errMsg}] eq {}}
-```
-
-`bigip/apm-build.sh` already does this. If you hand-edit a branch in the Visual Policy Editor,
-the same trap applies.
 
 ## A read-only user returns 401
 Testing roles with `curl` against iControl REST reports the read-only user as broken:
@@ -111,40 +90,6 @@ tmsh list auth source
 
 `docs/operations/runbooks/failover-check.md` exists to catch this before a customer does.
 
-## Keycloak refuses the realm
-The container exits immediately after import with:
-
-```text
-ERROR: Failed to run import
-ERROR: Unrecognized field "_comment" (class org.keycloak.representations.idm.RealmRepresentation)
-```
-
-Keycloak's importer rejects unknown fields outright rather than ignoring them. The realm
-template carries its rationale in `_comment` keys, so `deploy.sh` strips them with `jq` while
-rendering. If you import the template by hand, strip them too:
-
-```bash
-jq 'walk(if type == "object" then with_entries(select(.key | startswith("_comment") | not)) else . end)' \
-```
-
-## The BIG-IP cannot resolve Keycloak
-The OAuth step fails, or the token exchange never happens, while the same URL resolves
-perfectly from your workstation.
-
-A TMOS `dns-resolver` performs its own lookups in TMM. It does **not** read the appliance's
-`/etc/hosts`, so a hosts-file entry cannot fix this — that workaround covers the browser only.
-bigip-mgt-mfa ships CoreDNS for exactly this reason. Check the resolver and that it can reach
-the stack host:
-
-```bash
-tmsh list net dns-resolver bigip-mgt-mfa-resolver
-dig +short @<MFA_HOST_IP> <MFA_KEYCLOAK_FQDN>
-```
-
-Also confirm the issuer matches. `KC_HOSTNAME` pins Keycloak's issuer, and APM validates it
-against the configured provider URIs; a mismatch produces an opaque failure that names
-neither value.
-
 ## CoreDNS cannot bind port 53
 `docker compose up` fails with:
 
@@ -203,16 +148,6 @@ tmsh run util bash -c "sessiondump --allkeys | grep assigned.resources.pa | tail
 
 A healthy session lists both portal resources. `scripts/demo-login.sh` asserts against this.
 
-## Duplicated OAuth scope
-The authorization request goes out as `scope=openid openid`. Harmless with Keycloak, but it
-means the scope is configured twice: once as a value on the `scope` parameter of the
-auth-redirect `oauth-request` object, and once on the `aaa-oauth` agent. Leave the request
-object's `scope` parameter with no value — APM substitutes the agent's scope.
-
-Note also that `tmsh create` is not idempotent for these objects, so `bigip/apm-build.sh`
-deletes and recreates them; a re-run that only issues `create` leaves the old values in place
-and appears to change nothing.
-
 ## Portal access refuses the target
 Creating or using a portal resource fails with `01490585` / `errorcode=17`.
 
@@ -227,3 +162,91 @@ since an LTM pool cannot hold a self-IP. That path needs two database keys, whic
 tmsh modify sys db tmm.tcl.rule.node.allow_loopback_addresses value true
 tmsh modify sys db tmm.tcl.rule.connect.allow_loopback_addresses value true
 ```
+
+## Every code is rejected, for everyone, all at once
+
+Logins that worked yesterday all fail at the MFA step. Nothing else on the appliance
+misbehaves, which is what makes this one hard to guess.
+
+Check the clock before anything else. TOTP is computed from the current time step, so drift
+beyond the acceptance window rejects every code from every user simultaneously:
+
+```bash
+tmsh show sys ntp status
+```
+
+The window is `MFA_TOTP_PERIOD × (2 × MFA_TOTP_SKEW + 1)` — with the defaults, three minutes.
+`deploy.sh --bigip` prints the computed value on every run.
+
+## One user's codes are rejected
+
+Their authenticator and the stored seed disagree. The usual cause is enrolling without
+deploying: `scripts/enroll-totp.sh` writes the seed locally, and **`./deploy.sh --bigip` is
+what loads it into the appliance**. Until that runs, the BIG-IP is still checking against the
+previous seed, which is indistinguishable from a broken phone.
+
+Confirm what the appliance actually holds:
+
+```bash
+tmsh list ltm data-group internal bigip_mgt_mfa_totp_dg
+```
+
+The other cause is a period mismatch. Google Authenticator ignores the period in the QR and
+always generates 30-second codes, so at the default 60 it produces codes that never match.
+Re-enrol in FreeOTP, Aegis or 1Password, or set `MFA_TOTP_PERIOD=30`.
+
+## A brand-new user cannot log in at all
+
+Intended. No seed means no token, and the policy treats an absent token as a denial rather
+than a skipped factor — otherwise a new account would pass on a password alone. Enrol them
+and redeploy.
+
+## Every login is denied and the log blames the bind account
+
+`/var/log/apm` shows:
+
+```text
+LDAP Module: Failed to bind with 'cn=...,ou=svc,dc=...'. Invalid credentials.
+```
+
+Note whose DN that is: the **bind account's**, not the user's. It reads like the user's
+password is wrong, and it is not.
+
+The usual cause is a stale AAA object. `tmsh create apm aaa ldap` is not idempotent — it
+keeps the existing object and reports success — so after a change to the directory address,
+bind DN or search base, the appliance can be using values that appear in no config file. The
+build now deletes and recreates it; if you are on an older revision, remove the object and
+re-run.
+
+## The webtop opens TMUI's login form
+
+Single sign-on is not injecting the credential. The configuration can look perfect while this
+happens, which is why `validate.sh` now drives a real login rather than only inspecting
+objects.
+
+Check the portal item — and read it from the **`/items` sub-collection**, because the parent
+object reports these fields as `null` even when they are set correctly:
+
+```bash
+curl -sku admin: "https://<unit>/mgmt/tm/apm/resource/portal-access/~Common~<name>/items" \
+  | jq '.items[0] | {sso, headers}'
+```
+
+You want an `sso` naming the form-SSO profile and **two** headers. `referer` is what satisfies
+TMUI's `login.jsp` CSRF check; without it the form refuses the submission.
+
+## iControl REST stops answering
+
+Symptoms range from `401` and `502 Proxy Error` to `/mgmt/tm/util/bash` reporting
+`Public URI path not registered`. `restjavad` wedges under a heavy run of REST calls and
+usually recovers on its own; `bigstart restart restjavad` clears it.
+
+**This does not mean the demo is down.** The data plane is independent — TMM keeps serving
+the webtop perfectly while the management plane is unavailable. Check the VIP before
+concluding otherwise:
+
+```bash
+curl -sk -o /dev/null -w '%{http_code}\n' https://<MFA_APM_VIP>/
+```
+
+`validate.sh` gates its configuration checks on a reachability probe for this reason.

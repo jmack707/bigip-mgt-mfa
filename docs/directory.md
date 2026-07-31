@@ -13,7 +13,7 @@ passwords. The entire contact surface is three read-only interactions:
 |---|---|---|
 | APM (`aaa-ldap`, type `auth`) | Search for the user, then BIND as them | Search on the user subtree |
 | BIG-IP `auth ldap system-auth` | Resolve the user and read `memberOf` | Search + read `memberOf` |
-| Keycloak federation | Import identities, `editMode: READ_ONLY` | Search on the user subtree |
+| the directory federation | Import identities, `editMode: READ_ONLY` | Search on the user subtree |
 
 Passwords are verified by BIND, never by reading a hash, so the bind account needs no
 privilege beyond search. That is what makes it reasonable to point this demo at a production
@@ -48,11 +48,11 @@ scattered through the build scripts:
 | Setting | `openldap` | `ad` |
 |---|---|---|
 | Login attribute | `uid` | `sAMAccountName` |
-| Keycloak federation vendor | `other` | `ad` |
-| Keycloak UUID attribute | `entryUUID` | `objectGUID` |
-| Keycloak user object classes | `inetOrgPerson, organizationalPerson` | `person, organizationalPerson, user` |
+| the directory federation vendor | `other` | `ad` |
+| the directory UUID attribute | `entryUUID` | `objectGUID` |
+| the directory user object classes | `inetOrgPerson, organizationalPerson` | `person, organizationalPerson, user` |
 
-Getting the vendor or UUID attribute wrong makes Keycloak's federation import zero users
+Getting the vendor or UUID attribute wrong makes the directory's federation import zero users
 without a useful error, which is why these are derived rather than typed.
 
 Any of them can still be overridden explicitly — `MFA_LOGIN_ATTR`, `MFA_KC_LDAP_VENDOR`,
@@ -79,10 +79,10 @@ appliance rather than an obvious TLS error.
   needs to write.
 
 ## Before touching a BIG-IP
-Prove the directory first. `./deploy.sh --stack` contacts no appliance, and Keycloak's
+Prove the directory first. `./deploy.sh --stack` contacts no appliance, and the directory's
 federation is the fastest end-to-end check that the bind account, search base, and schema
-settings are right: if users appear in the Keycloak admin console under realm
-`${MFA_KEYCLOAK_REALM}`, the same credentials will work for APM and for the BIG-IPs.
+settings are right: if users appear in the the directory admin console under realm
+the same credentials will work for APM and for the BIG-IPs.
 
 ```bash
 ldapwhoami -x -H "ldap://${MFA_LDAP_HOST}:${MFA_LDAP_PORT}" -D "${MFA_BIND_DN}" -w "${MFA_BIND_PW}"

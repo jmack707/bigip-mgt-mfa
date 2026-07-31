@@ -46,7 +46,6 @@ curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" \
 
 ## Procedure
 ### Upgrading the container images
-The images are pinned by tag in `docker-compose.yml` — `quay.io/keycloak/keycloak:26.4`,
 `docker.io/coredns/coredns:1.12.0` and `osixia/openldap:1.5.0`. Change the tag, then re-run the
 stack half; Compose pulls the new image and recreates only the services whose definition
 changed:
@@ -59,7 +58,6 @@ docker compose --profile bundled ps
 
 The named volumes survive, so enrolled TOTP secrets and the seeded directory carry across. That
 persistence has one consequence worth knowing: the realm is imported at container start from
-`keycloak/import/`, and a realm that already exists in the persisted store is kept as-is. If you
 to be re-imported into an empty store — which means dropping `kcdata` and re-enrolling every
 user, so treat it as a rebuild rather than an upgrade:
 
@@ -67,9 +65,6 @@ user, so treat it as a rebuild rather than an upgrade:
 ./teardown.sh --stack --volumes && ./deploy.sh --stack
 ```
 
-A Keycloak upgrade does not touch the BIG-IP as long as the issuer string is unchanged. APM
-validates the issuer literally, so if you change `MFA_KEYCLOAK_FQDN`, `MFA_KEYCLOAK_PORT` or
-`MFA_KEYCLOAK_REALM`, run the BIG-IP half afterwards as well.
 
 ### Re-running after editing `.env`
 
@@ -79,19 +74,15 @@ $EDITOR .env
 ```
 
 `gen-certs.sh` reissues the leaf certificates on every run, so a changed `MFA_HOST_IP`,
-`MFA_KEYCLOAK_FQDN`, `MFA_WEBTOP_FQDN` or `MFA_APM_VIP` produces correct SANs immediately — but the
-new `webtop.crt` only reaches the appliances via the BIG-IP half, and Keycloak and OpenLDAP read
 their certificate files at process start. `docker compose up -d` does not restart a service
 whose definition has not changed, so restart them explicitly when the certificates moved:
 
 ```bash
-docker compose --profile bundled restart keycloak openldap
 ./deploy.sh --bigip
 ```
 
 Changes to the directory block (`BASE_DN`, `MFA_ADMIN_GROUP_DN`, `MFA_ADMIN_ROLE_ATTRIBUTE`,
 `MFA_LOGIN_ATTR`) affect all three consumers — the APM AAA agent, the BIG-IP `remote-role`, and
-Keycloak's federation — so they need both halves. Re-seeding is additive: `deploy.sh` will not
 move existing entries to a new `BASE_DN`, so a base-DN change is a rebuild
 ([Teardown](#teardown), then a fresh deploy).
 
@@ -101,7 +92,6 @@ and always takes two steps:
 
 ```bash
 MFA_REGEN_CA=1 ./deploy.sh --stack   # mint a new CA and reissue every leaf certificate
-docker compose --profile bundled restart keycloak openldap
 ./deploy.sh --bigip                 # push the new anchor + VIP certificate to the appliances
 ```
 
@@ -119,7 +109,6 @@ scripts/demo-login.sh bob.user
 Expected, unchanged from [deploy.md](deploy.md#verification): zero failed checks; alice reaches
 the webtop with both TMUI resources on the session and lands in TMUI as Administrator; bob
 reaches the same webtop and lands read-only. If the CA fingerprint changed, browsers that have
-not re-imported it will fail at the OIDC redirect rather than with a visible certificate
 warning.
 
 ## Rollback
@@ -131,14 +120,12 @@ git checkout <previous-revision>
 ```
 
 For an image rollback, restore the previous tag in `docker-compose.yml` and re-run the stack
-half. Keycloak's persisted store is not guaranteed to be readable by an older release, so if the
 container fails to start after a downgrade, drop the volume and rebuild — accepting that
 enrolled TOTP secrets are lost:
 
 ```bash
 git checkout <previous-revision> -- docker-compose.yml
 ./deploy.sh --stack
-docker compose logs --tail 50 keycloak     # if it will not start on the older image:
 ./teardown.sh --stack --volumes && ./deploy.sh --stack
 ```
 
@@ -171,12 +158,10 @@ To remove the generated material as well, which discards the CA:
 
 ```bash
 sudo chown -R "$(id -u):$(id -g)" certs             # openldap chowns this dir at startup
-rm -rf certs keycloak/import dns/Corefile
 ```
 
 ### Verification
 ```bash
-docker ps --format '{{.Names}}'                     # no keycloak / bigip-mgt-mfa-dns / openldap
 curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" "https://${BIGIP_A_MGMT}/mgmt/tm/auth/source" | jq -r .type
 ```
 

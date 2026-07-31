@@ -11,7 +11,7 @@ _Last validated: 2026-07-30_
   host and this is a lab CA, not a managed one.
 - A demo environment is being handed to someone else and should not keep trusting material the
   previous holder still has.
-- You changed `MFA_HOST_IP`, `MFA_KEYCLOAK_FQDN`, `MFA_WEBTOP_FQDN` or `MFA_APM_VIP`. This case does
+- You changed `MFA_HOST_IP`, `MFA_WEBTOP_FQDN` or `MFA_APM_VIP`. This case does
   **not** need a CA roll: the leaf certificates are reissued on every ordinary
   `./deploy.sh --stack` and only the SANs change. Use
   [../../upgrade.md](../../upgrade.md#procedure) instead.
@@ -53,11 +53,11 @@ down until both halves of `deploy.sh` have run and the anchors are back.
    three (bundled) or two (external) `issue` lines.
 
 3. Restart the containers that read certificate files at process start. `docker compose up -d`
-   does not recreate a service whose definition has not changed, so Keycloak and OpenLDAP go on
+   does not recreate a service whose definition has not changed, so OpenLDAP go on
    presenting the old certificates until they are restarted:
 
    ```bash
-   docker compose --profile bundled restart keycloak openldap
+   docker compose --profile bundled restart openldap
    ```
 
 4. Push the new anchor and the new VIP certificate to the appliances. This updates the LDAPS
@@ -71,23 +71,23 @@ down until both halves of `deploy.sh` have run and the anchors are back.
    object that still holds the old CA fails closed against the new LDAPS certificate.
 
 5. Re-import `certs/ca.crt` into every browser and OS trust store that held the old one, and
-   remove the old import. The webtop VIP is the OIDC `redirect_uri` origin, so a browser that
+   remove the old import. The webtop VIP is what the browser connects to, so a browser that
    distrusts it fails at the redirect rather than showing a certificate warning.
 
 In external directory mode step 2 does not reissue an LDAPS certificate — the BIG-IP validates
-your directory against `MFA_LDAP_CA_FILE`, which this runbook does not touch. Only the Keycloak
+your directory against `MFA_LDAP_CA_FILE`, which this runbook does not touch. Only the demo
 and webtop certificates change.
 
 ## Verification
 ```bash
 openssl x509 -in certs/ca.crt -noout -fingerprint -sha256 -enddate
-openssl s_client -connect "${MFA_HOST_IP}:${MFA_KEYCLOAK_PORT}" -servername "${MFA_KEYCLOAK_FQDN}" \
+openssl s_client -connect "${MFA_APM_VIP}:443" -servername "${MFA_WEBTOP_FQDN}" \
   </dev/null 2>/dev/null | openssl x509 -noout -issuer -dates
 ./scripts/validate.sh; echo "failed checks: $?"
 scripts/demo-login.sh alice.admin
 ```
 
-Expected: the fingerprint differs from the one recorded in step 1; the certificate Keycloak
+Expected: the fingerprint differs from the one recorded in step 1; the certificate the webtop VIP
 presents is issued by the new CA with fresh dates; `validate.sh` exits `0`; and `demo-login.sh`
 completes the whole chain, which is what proves the BIG-IP re-anchored rather than merely
 accepting a cached session.
@@ -114,7 +114,7 @@ the CA it finds:
 sudo chown -R "$(id -u):$(id -g)" certs
 rm -rf certs && cp -a certs.bak.<timestamp> certs
 ./deploy.sh --stack
-docker compose --profile bundled restart keycloak openldap
+docker compose --profile bundled restart openldap
 ./deploy.sh --bigip
 ```
 
@@ -123,13 +123,11 @@ from which you removed the old CA needs it back. Without a backup there is no ro
 key is gone and the only way forward is to finish the roll and re-import everywhere.
 
 ## Escalation
-- Keycloak will not start after the restart: `docker compose logs --tail 50 keycloak`. A
-  certificate it cannot read is a startup failure, not a runtime one.
 - `validate.sh` reports the BIG-IP LDAPS checks failing while the containers are healthy: the
   anchor did not update on that unit. Re-run `BIGIP_MGMT=<unit> bigip/system-auth.sh` and read
   the `HTTP` lines it prints.
-- The webtop loads but the Keycloak redirect fails: the browser still holds only the old CA, or
-  the BIG-IP's OAuth back-channel is validating against the stale `bigip-mgt-mfa-ca.crt` uploaded
+- The webtop shows a certificate warning: the browser still holds only the old CA, or the
+  BIG-IP is validating LDAPS against the stale `bigip-mgt-mfa-ca.crt` uploaded
   by the APM build — re-run `./deploy.sh --bigip` and see
   [../troubleshooting.md](../troubleshooting.md).
 - Anything still unexplained after the anchors are confirmed on both units belongs with the lab
