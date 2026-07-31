@@ -42,7 +42,6 @@ SHADOW_A="${WL_SHADOW_A:-192.0.2.5}"
 SHADOW_B="${WL_SHADOW_B:-192.0.2.6}"
 KC_AAA=${P}-keycloak-otp
 SHADOW_KC="${WL_SHADOW_KC:-192.0.2.7}"   # non-routable façade for the Keycloak call
-KC_BASE="https://${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}/realms/${WL_KEYCLOAK_REALM}"
 
 step(){ echo; echo "== $* =="; }
 add(){ # add <url> <json> — additive POST tolerating 409
@@ -101,34 +100,29 @@ step "3. AAA LDAP server (password check happens here, by BIND)"
 # wrap so the DN commas pass through tmsh intact.
 bash_cmd "tmsh create ltm pool ${AAA}-pool { members add { ${WL_LDAP_HOST}:${WL_LDAP_PORT} } monitor tcp } ; tmsh create apm aaa ldap ${AAA} { pool ${AAA}-pool port ${WL_LDAP_PORT} admin-dn \"${WL_BIND_DN}\" admin-encrypted-password \"${WL_BIND_PW}\" base-dn \"${WL_USER_SEARCH_BASE}\" }"
 
-step "4. layered virtual server for the Keycloak call"
-# APM's HTTP auth agent refuses an https:// backend outright ("Using Http auth agent against
-# SSL backend is not allowed, please, create a layered virtual server with serverssl
-# profile"). So APM speaks plain HTTP to a non-routable façade on this same device, and the
-# BIG-IP re-encrypts to Keycloak with a server-side profile that validates the demo CA. The
-# cleartext hop never leaves TMM; the hop that crosses the network is TLS.
-add "$B/mgmt/tm/ltm/pool" "$(jq -n --arg n "${P}-kc-pool" --arg m "${WL_HOST_IP}:${WL_KEYCLOAK_PORT}" \
-  '{name:$n,partition:"Common",monitor:"/Common/tcp",members:[{name:$m}]}')"
-# Validate Keycloak properly rather than trusting anything: our CA, and the certificate must
-# actually be for the Keycloak name (SNI set to match, or the handshake gets the wrong vhost).
-add "$B/mgmt/tm/ltm/profile/server-ssl" "$(jq -n --arg n "${P}-serverssl-kc" --arg ca "/$PART/${P}-ca.crt" --arg sn "${WL_KEYCLOAK_FQDN}" \
-  '{name:$n,partition:"Common",defaultsFrom:"/Common/serverssl",caFile:$ca,peerCertMode:"require",authenticate:"once",authenticateName:$sn,serverName:$sn}')"
-# The façade address is not the name on Keycloak's certificate, and Keycloak is issuing
-# tokens whose issuer is bound to its configured hostname — so put the real Host back.
-add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-kc-host" --arg b "when HTTP_REQUEST {
-    HTTP::header replace Host \"${WL_KEYCLOAK_FQDN}:${WL_KEYCLOAK_PORT}\"
-}" '{name:$n,partition:"Common",apiAnonymous:$b}')"
-add "$B/mgmt/tm/ltm/virtual" "$(jq -n --arg n "${P}-kc-vs" --arg d "/$PART/${SHADOW_KC}:80" \
-  --arg p "/$PART/${P}-kc-pool" --arg ss "/$PART/${P}-serverssl-kc" --arg ir "/$PART/${P}-kc-host" \
-  '{name:$n,partition:"Common",destination:$d,mask:"255.255.255.255",ipProtocol:"tcp",pool:$p,
-    profiles:[{name:"/Common/tcp"},{name:"/Common/http"},{name:$ss,context:"serverside"}],
-    rules:[$ir],sourceAddressTranslation:{type:"automap"}}')"
+step "4. TOTP seed store"
+# A data group, not a directory attribute. The directory owns identity; the MFA verifier
+# owns token secrets -- the same split a real MFA product makes. It also keeps a
+# credential-equivalent secret off the user's directory entry, where anything able to read
+# the entry could mint valid codes.
+#
+# Seeds come from certs/totp-seeds.env, written by scripts/enroll-totp.sh. Absent that file
+# nobody has a token and every login is denied, which is the correct failure direction.
+SEEDS_FILE="${HERE}/../certs/totp-seeds.env"
+RECORDS='[]'
+if [ -f "$SEEDS_FILE" ]; then
+  while IFS='=' read -r u sec; do
+    case "$u" in ''|\#*) continue;; esac
+    RECORDS=$(jq -c --arg n "$u" --arg d "$sec" '. += [{name:$n,data:$d}]' <<<"$RECORDS")
+  done < "$SEEDS_FILE"
+fi
+echo "  seeds loaded: $(jq -r 'length' <<<"$RECORDS")"
+curl "${A[@]}" -o /dev/null -w "  DEL previous data-group -> %{http_code}\n" -X DELETE "$B/mgmt/tm/ltm/data-group/internal/~${PART}~warden_lite_totp_dg"
+add "$B/mgmt/tm/ltm/data-group/internal" "$(jq -n --argjson r "$RECORDS" '{name:"warden_lite_totp_dg",partition:"Common",type:"string",records:$r}')"
 
-step "5. Keycloak verification iRule"
-# envsubst is restricted to OUR placeholders so the iRule's own $vars survive untouched.
-KC_IRULE_BODY="$(SHADOW_KC="$SHADOW_KC" envsubst '${WL_OIDC_CLIENT_ID} ${WL_OIDC_CLIENT_SECRET} ${WL_KEYCLOAK_REALM} ${WL_KEYCLOAK_FQDN} ${WL_KEYCLOAK_PORT} ${SHADOW_KC}' < "${HERE}/apm-keycloak-otp.irule")"
-curl "${A[@]}" -o /dev/null -w "  DEL previous rule -> %{http_code}\n" -X DELETE "$B/mgmt/tm/ltm/rule/~${PART}~${P}-kc-verify"
-add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-kc-verify" --arg b "$KC_IRULE_BODY" '{name:$n,partition:"Common",apiAnonymous:$b}')"
+step "5. TOTP verification iRule"
+curl "${A[@]}" -o /dev/null -w "  DEL previous rule -> %{http_code}\n" -X DELETE "$B/mgmt/tm/ltm/rule/~${PART}~${P}-totp-verify"
+add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-totp-verify" --arg b "$(cat "${HERE}/apm-totp-verify.irule")" '{name:$n,partition:"Common",apiAnonymous:$b}')"
 
 step "6. customization groups"
 add "$B/mgmt/tm/apm/policy/customization-group" "$(jq -n --arg n "${P}_act_logon_ag" '{name:$n,partition:"Common",source:"/Common/modern",type:"logon"}')"
@@ -141,9 +135,18 @@ done
 step "7. agents: logon page, LDAP auth, Keycloak verify, SSO mapping, resource assign"
 add "$B/mgmt/tm/apm/policy/agent/logon-page" "$(jq -n --arg n "${P}_act_logon_ag" --arg cg "/$PART/${P}_act_logon_ag" \
   '{name:$n,partition:"Common",customizationGroup:$cg,
-    fieldType1:"text",postVarName1:"username",sessionVarName1:"username",fieldModifiable1:"true",
-    fieldType2:"password",postVarName2:"password",sessionVarName2:"password",fieldModifiable2:"true",
-    fieldType3:"password",postVarName3:"otp",sessionVarName3:"otp",fieldModifiable3:"true"}')"
+    fieldType1:"text",postVarName1:"username",sessVarName1:"username",fieldModifiable1:"true",
+    fieldType2:"password",postVarName2:"password",sessVarName2:"password",fieldModifiable2:"true",
+    fieldType3:"text",postVarName3:"otp",sessVarName3:"otp",fieldModifiable3:"true"}')"
+# fieldType3 is "text", not "password": APM stores password-type fields as SECURE session
+# variables, and a plain `ACCESS::session data get` on one returns an empty string -- the
+# verifier then sees no code at all and denies every login. A one-time code is valid for
+# 30 seconds and is not a long-lived secret, so a text field is the right trade here.
+#
+# sessVarName, NOT sessionVarName. TMOS silently drops the unknown property and leaves the
+# default, so field 3 lands in session.logon.last.field3 and the OTP never reaches the
+# verifier. Fields 1 and 2 hide the mistake because their defaults are already username and
+# password -- only the third field exposes it.
 # LDAP Auth (type=auth): APM locates the entry with the filter, then BINDS as that user to
 # prove the password. Nothing reads a password hash, which is why the bind account needs no
 # privilege beyond search.
@@ -151,7 +154,7 @@ add "$B/mgmt/tm/apm/policy/agent/aaa-ldap" "$(jq -n --arg n "${P}_act_ldapauth_a
   --arg base "${WL_USER_SEARCH_BASE}" --arg f "(${WL_LOGIN_ATTR}=%{session.logon.last.username})" \
   '{name:$n,partition:"Common",type:"auth",server:$s,searchDn:$base,filter:$f,maxLogonAttempt:3}')"
 add "$B/mgmt/tm/apm/policy/agent/irule-event" "$(jq -n --arg n "${P}_act_kcverify_ag" \
-  '{name:$n,partition:"Common",id:"kc_verify"}')"
+  '{name:$n,partition:"Common",id:"totp_verify"}')"
 # SSO Credential Mapping: hand the webtop resources the credential the user already proved.
 # This is the entire "single sign-on" of the demo — no vault, no shared account.
 add "$B/mgmt/tm/apm/policy/agent/variable-assign" "$(jq -n --arg n "${P}_act_ssomap_ag" \
@@ -228,9 +231,9 @@ tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_ssomap"),partition:"Common",ca
 # Keycloak Verify: one direct-grant call that proves the password AND the one-time code
 # belong to the same user. Anything but a clean success is a Deny — a failed second factor
 # must never degrade to first-factor-only access.
-tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_kcverify"),partition:"Common",caption:"MFA (Keycloak)",color:1,itemType:"action",loop:"false",
+tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_kcverify"),partition:"Common",caption:"MFA (TOTP)",color:1,itemType:"action",loop:"false",
   agents:[{name:($p+"_act_kcverify_ag"),partition:"Common",type:"irule-event"}],
-  rules:[{caption:"Successful",expression:"expr {[mcget {session.custom.kc.verified}] == 1}",nextItem:("/Common/"+$p+"_act_ssomap")},
+  rules:[{caption:"Successful",expression:"expr {[mcget {session.custom.totp.verified}] == 1}",nextItem:("/Common/"+$p+"_act_ssomap")},
          {caption:"fallback",nextItem:("/Common/"+$p+"_end_deny")}]}')"
 tadd "$PI" "$(jq -n --arg p "$P" '{name:($p+"_act_ldapauth"),partition:"Common",caption:"LDAP Auth",color:1,itemType:"action",loop:"false",
   agents:[{name:($p+"_act_ldapauth_ag"),partition:"Common",type:"aaa-ldap"}],
@@ -252,7 +255,7 @@ step "11. the webtop virtual server ${VIP_IP}:443"
 # traffic-group so the VIP floats: the access tier itself survives a failover, which is the
 # point of putting it on the pair rather than beside it.
 add "$B/mgmt/tm/ltm/virtual" "$(jq -n --arg n "${P}-vs" --arg d "/$PART/${VIP_IP}:443" --arg cs "/$PART/${P}-clientssl" \
-  --arg ap "/$PART/$P" --arg rs "/$PART/${P}-referer-strip" --arg cp "/$PART/${P}-connectivity" --arg kc "/$PART/${P}-kc-verify" \
+  --arg ap "/$PART/$P" --arg rs "/$PART/${P}-referer-strip" --arg cp "/$PART/${P}-connectivity" --arg kc "/$PART/${P}-totp-verify" \
   '{name:$n,partition:"Common",destination:$d,mask:"255.255.255.255",ipProtocol:"tcp",
     profiles:[{name:"/Common/tcp"},{name:"/Common/http"},{name:$cs,context:"clientside"},{name:"/Common/serverssl",context:"serverside"},{name:$ap},{name:$cp},{name:"/Common/rewrite-portal"},{name:"/Common/rba"},{name:"/Common/ppp"},{name:"/Common/websso"}],
     rules:[$kc,$rs],sourceAddressTranslation:{type:"automap"}}')"

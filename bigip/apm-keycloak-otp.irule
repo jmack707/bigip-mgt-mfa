@@ -42,6 +42,7 @@ when ACCESS_POLICY_AGENT_EVENT {
         append body "&otp=[URI::encode $o]"
 
         set c [connect -timeout 5000 -idle 10 ${SHADOW_KC}:80]
+        log local0. "wl-kc: connect to ${SHADOW_KC}:80 returned '$c'"
         if { $c eq "" } {
             ACCESS::session data set session.custom.kc.err "connect-failed"
             return
@@ -61,6 +62,7 @@ when ACCESS_POLICY_AGENT_EVENT {
             append resp $chunk
         }
         close $c
+        log local0. "wl-kc: response bytes=[string length $resp] first120=[string range $resp 0 120]"
 
         # A token in the body is the only thing that counts as success. Anything else --
         # 401 invalid_user_credentials, a lockout, an unreachable Keycloak -- leaves the

@@ -96,5 +96,18 @@ fi
 
 # 5. switch the auth source. admin/root stay local.
 req PATCH "$B/mgmt/tm/auth/source" '{"type":"ldap"}' >/dev/null
-req POST  "$B/mgmt/tm/sys/config" '{"command":"save"}' >/dev/null
+
+# Retry the save. Everything above is already live in the running config; this only
+# persists it. mcpd intermittently refuses the connection right after an auth-source change
+# and returns 500 "Connection refused" -- letting that abort the whole deploy (as `set -e`
+# would) throws away work that actually succeeded.
+saved=0
+for attempt in 1 2 3 4 5; do
+  code=$(curl "${AUTH[@]}" -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+         -d '{"command":"save"}' "$B/mgmt/tm/sys/config" || echo 000)
+  if [ "$code" = 200 ]; then saved=1; break; fi
+  echo "    save attempt ${attempt} -> ${code}, retrying" >&2
+  sleep 6
+done
+[ "$saved" = 1 ] || echo "    WARNING: config is live but was not saved to disk on ${BIGIP_MGMT}" >&2
 echo "    ${BIGIP_MGMT}: remote auth -> ${WL_LDAP_HOST}, admins = ${WL_ADMIN_ROLE_ATTRIBUTE}"
