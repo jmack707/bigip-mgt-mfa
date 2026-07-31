@@ -65,6 +65,32 @@ ISS=$(curl -sk "${RES[@]}" -m8 "$DISC" | jq -r '.issuer // empty')
 AUTH_EP=$(curl -sk "${RES[@]}" -m8 "$DISC" | jq -r '.authorization_endpoint // empty')
 [ -n "$AUTH_EP" ] && ok "authorization endpoint advertised" || bad "no authorization endpoint"
 
+# Preflight: is the management plane even answering? Every BIG-IP check below reads config
+# over iControl REST, and an unreachable restjavad looks EXACTLY like a missing object --
+# both produce an empty jq result. Reporting "access profile NOT on B" when the real problem
+# is a wedged control plane sends you hunting through configuration that was never broken.
+# It has happened twice; hence this gate.
+#
+# Note the data plane is independent: TMM keeps serving the webtop perfectly while restjavad
+# is down, so "REST unreachable" is not the same as "the demo is down". Check the VIP.
+A=(-sk -u "${BIGIP_USER}:${BIGIP_PASS:-}")
+mgmt_up(){ # mgmt_up <address>
+  curl "${A[@]}" -o /dev/null -m8 -w '%{http_code}' "https://$1/mgmt/tm/sys/version" 2>/dev/null | grep -q '^200$'
+}
+REST_DOWN=0
+if [ -n "${BIGIP_PASS:-}" ]; then
+  for u in "$BIGIP_A_MGMT" "$BIGIP_B_MGMT"; do
+    mgmt_up "$u" || { REST_DOWN=1; printf '  \033[33mSKIP\033[0m  %s iControl REST is not answering\n' "$u"; }
+  done
+fi
+if [ "$REST_DOWN" = 1 ]; then
+  sect "BIG-IP access tier"
+  skip "every BIG-IP config check — the management plane is unreachable, not necessarily misconfigured"
+  echo "        restjavad may be wedged: 'bigstart restart restjavad' on the unit."
+  echo "        The data plane is separate — check the VIP before assuming the demo is down:"
+  echo "        curl -sk -o /dev/null -w '%{http_code}\n' https://${WL_APM_VIP}/"
+else
+
 sect "BIG-IP access tier"
 if [ -z "${BIGIP_PASS:-}" ]; then
   skip "BIGIP_PASS not set — skipping BIG-IP checks"
@@ -127,6 +153,8 @@ else
       || bad "$unit: bob.user got '${R:-unknown}', expected Guest"
   done
 fi
+
+fi   # end of the management-plane gate
 
 sect "front door"
 CODE=$(curl -sk -o /dev/null -w '%{http_code}' -m10 --resolve "${WL_WEBTOP_FQDN}:443:${WL_APM_VIP}" "https://${WL_WEBTOP_FQDN}/" 2>/dev/null)

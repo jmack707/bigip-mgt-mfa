@@ -44,18 +44,47 @@ KC_AAA=${P}-keycloak-otp
 SHADOW_KC="${WL_SHADOW_KC:-192.0.2.7}"   # non-routable façade for the Keycloak call
 
 step(){ echo; echo "== $* =="; }
-add(){ # add <url> <json> — additive POST tolerating 409
-  local code; code=$(curl "${A[@]}" -o /tmp/wl-apm.out -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "$2" "$1")
-  echo "  POST ${1##*/tm/} -> $code"
-  case "$code" in 200|201|409) ;; *) echo "    $(cat /tmp/wl-apm.out)"; return 1;; esac
+add(){ # add <url> <json> — additive POST tolerating 409, retrying transient failures
+  # The BIG-IP's REST layer is not reliable under the volume of calls a full build makes:
+  # restjavad returns 401 or 502 ("Error reading from remote server"), or stops answering
+  # entirely, and recovers a few seconds later. Because step 2 tears the policy down before
+  # rebuilding it, a single transient error used to abort the run and leave the demo DELETED
+  # rather than merely unchanged. That is the worst possible failure mode for something you
+  # demo, so transient codes are retried rather than fatal.
+  local code attempt=1 max=5
+  while :; do
+    code=$(curl "${A[@]}" -o /tmp/wl-apm.out -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "$2" "$1" || echo 000)
+    case "$code" in
+      200|201|409) echo "  POST ${1##*/tm/} -> $code"; return 0 ;;
+      000|401|500|502|503|504)
+        if [ "$attempt" -ge "$max" ]; then
+          echo "  POST ${1##*/tm/} -> $code (gave up after ${max} attempts)"
+          echo "    $(head -c 300 /tmp/wl-apm.out)"; return 1
+        fi
+        echo "  POST ${1##*/tm/} -> $code (transient, retry ${attempt}/${max})"
+        sleep $((attempt * 4)); attempt=$((attempt + 1)) ;;
+      *) echo "  POST ${1##*/tm/} -> $code"; echo "    $(head -c 300 /tmp/wl-apm.out)"; return 1 ;;
+    esac
+  done
 }
 bash_cmd(){ # bash_cmd <tmsh-or-shell> — run via /tm/util/bash, print commandResult
   # tmsh reports errors in commandResult with a 200 on the wire, so a naive caller sees
   # success. Surface anything that looks like an error loudly: a silently-skipped tmsh
   # command is how the portal headers went missing while the build claimed to work.
-  local out
-  out=$(curl "${A[@]}" -X POST -H 'Content-Type: application/json' "$B/mgmt/tm/util/bash" \
-        -d "$(jq -n --arg u "-c '$1'" '{command:"run",utilCmdArgs:$u}')" | jq -r '.commandResult // ""')
+  local out attempt=1
+  while :; do
+    out=$(curl "${A[@]}" -X POST -H 'Content-Type: application/json' "$B/mgmt/tm/util/bash" \
+          -d "$(jq -n --arg u "-c '$1'" '{command:"run",utilCmdArgs:$u}')" | jq -r '.commandResult // ""' 2>/dev/null || echo "")
+    # A 502 arrives as an HTML error page, not JSON, so jq yields nothing. Distinguish that
+    # from a command that legitimately printed nothing by retrying a bounded number of times.
+    case "$out" in
+      *"Proxy Error"*|*"<html>"*|*"resterrorresponse"*)
+        [ "$attempt" -ge 4 ] && break
+        echo "    (REST transient, retry ${attempt}/4)" >&2
+        sleep $((attempt * 4)); attempt=$((attempt + 1)) ;;
+      *) break ;;
+    esac
+  done
   [ -n "$out" ] && echo "$out"
   case "$out" in
     *"Syntax Error"*|*"was not found"*|*"01020036"*|*"is not allowed"*)
@@ -200,6 +229,12 @@ add "$B/mgmt/tm/apm/sso/form-based" "$(jq -n --arg n "${P}-tmui-sso" \
   '{name:$n,partition:"Common",startUri:"/tmui/login.jsp*",formAction:"/tmui/logmein.html",formUsername:"username",formPassword:"passwd",formMethod:"post",successMatchType:"url",successMatchValue:"/"}')"
 add "$B/mgmt/tm/apm/resource/webtop" "$(jq -n --arg n "${P}-webtop" --arg cg "/$PART/${P}_webtop_cg" '{name:$n,partition:"Common",customizationGroup:$cg,webtopType:"full"}')"
 mk_portal(){ # mk_portal <name> <facade-ip> <acl-order> <caption>
+  # NOT delete-then-create. `caption` is not a settable property of this object at all -- it
+  # is refused on PATCH, ignored on POST, and absent from the tmsh property list; the webtop
+  # tile label lives somewhere in the resource customization group that I have not pinned
+  # down. Recreating therefore does not fix the caption, and it WOULD destroy one set by hand
+  # in the GUI, which is currently the only way to set it. So the create stays 409-tolerant
+  # and a hand-set caption survives every redeploy.
   add "$B/mgmt/tm/apm/resource/portal-access" "$(jq -n --arg n "$1" --arg h "$2" --argjson o "$3" --arg c "$4" --arg sso "/$PART/${P}-tmui-sso" \
     '{name:$n,partition:"Common",aclOrder:$o,publishOnWebtop:"true",caption:$c,
       applicationUri:("https://"+$h+"/tmui/login.jsp"),
@@ -208,11 +243,15 @@ mk_portal(){ # mk_portal <name> <facade-ip> <acl-order> <caption>
   # parentheses ("BIG-IP A (TMUI)") which break the parse of the whole line, and because
   # bash_cmd never inspected an exit code the failure was invisible -- the headers silently
   # went unset while the build reported success.
-  bash_cmd "tmsh modify apm resource portal-access $1 caption '$4'"
   # sso AND headers in ONE items-modify: an items-modify replaces the item's block, so
   # setting one of them alone wipes the other. destipaddr steers the portal engine to the
   # facade; referer satisfies TMUI login.jsp CSRF.
-  bash_cmd "tmsh modify apm resource portal-access $1 items modify { item1 { sso /$PART/${P}-tmui-sso headers replace-all-with { destipaddr { name destipaddr value $2 } referer { name referer value https://$2:443 } } } }"
+  # headers takes a brace block containing UNNAMED entries -- `headers replace-all-with {...}`
+  # and `headers add {...}` are both rejected with
+  #   Syntax Error: "headers" you must specify either "none" or "{"
+  # sso and headers go in the SAME items-modify: an items-modify replaces the item block, so
+  # setting one alone silently drops the other.
+  bash_cmd "tmsh modify apm resource portal-access $1 items modify { item1 { sso /$PART/${P}-tmui-sso headers { { name destipaddr value $2 } { name referer value https://$2:443 } } } }"
 }
 mk_portal "${P}-bigip-a-tmui" "$SHADOW_A" 1 "BIG-IP A (TMUI)"
 mk_portal "${P}-bigip-b-tmui" "$SHADOW_B" 2 "BIG-IP B (TMUI)"
