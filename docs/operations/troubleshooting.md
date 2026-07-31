@@ -125,7 +125,6 @@ rendering. If you import the template by hand, strip them too:
 
 ```bash
 jq 'walk(if type == "object" then with_entries(select(.key | startswith("_comment") | not)) else . end)' \
-  keycloak/bigip-mgt-mfa-realm.json.tmpl
 ```
 
 ## The BIG-IP cannot resolve Keycloak

@@ -62,13 +62,12 @@ and nothing to rotate.
 - **Keycloak is a second-factor oracle, not a general IdP.** Its browser flow asks for a
   username and a one-time code, deliberately not a password, because APM has already proven
   the password. Anything else pointed at this realm would be authenticated by OTP alone. See
-  [adr/0002-second-factor-only-realm.md](adr/0002-second-factor-only-realm.md).
+  [adr/0002-verify-totp-on-the-bigip.md](adr/0002-verify-totp-on-the-bigip.md).
 - **`admin` and `root` stay local on TMOS.** Switching the auth source to LDAP cannot lock
   anyone out of the box.
 
 ## Constraints and non-goals
 - **Not a production access-management design.** Keycloak runs in development mode against an
-  embedded database ([adr/0004-keycloak-dev-mode.md](adr/0004-keycloak-dev-mode.md)), secrets
   live in a `.env` file, and the CA is self-signed. It is a demo, and it says so.
 - **No privileged-access story.** The user's own credential is what reaches TMUI. If the
   requirement is that operators never hold a credential that works on the appliance at all,
@@ -90,8 +89,7 @@ and nothing to rotate.
   failover and then fails every login on the new active unit.
 
 ## Decisions
-- [adr/0001-apm-first-auth-order.md](adr/0001-apm-first-auth-order.md) — APM proves the password before stepping up to Keycloak
-- [adr/0002-second-factor-only-realm.md](adr/0002-second-factor-only-realm.md) — the Keycloak realm asks for a username and OTP, not a password
+- [adr/0001-apm-collects-the-password.md](adr/0001-apm-collects-the-password.md) — APM proves the password before stepping up to Keycloak
+- [adr/0002-verify-totp-on-the-bigip.md](adr/0002-verify-totp-on-the-bigip.md) — the Keycloak realm asks for a username and OTP, not a password
 - [adr/0003-authorization-on-remote-role.md](adr/0003-authorization-on-remote-role.md) — the target BIG-IP decides the role, not APM
-- [adr/0004-keycloak-dev-mode.md](adr/0004-keycloak-dev-mode.md) — Keycloak runs in development mode so the demo stays self-contained
 - [adr/0005-bundled-directory-default.md](adr/0005-bundled-directory-default.md) — a bundled directory by default, AD and LDAP as configuration

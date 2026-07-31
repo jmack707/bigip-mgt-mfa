@@ -155,10 +155,10 @@ publishes an issuer at all.
 The realm is a second-factor oracle, not a general identity provider: its browser flow is
 Username Form followed by OTP Form, with no password step, because APM has already proven
 the password against the directory before it redirects ([ADR
-0002](../adr/0002-second-factor-only-realm.md)). `CONFIGURE_TOTP` is a default required
+0002](../adr/0002-verify-totp-on-the-bigip.md)). `CONFIGURE_TOTP` is a default required
 action, so the first login for each user enrols an authenticator. Keycloak runs in
 development mode with an H2 store persisted in a volume, which is what keeps enrolments
-across a restart ([ADR 0004](../adr/0004-keycloak-dev-mode.md)).
+across a restart ([ADR 0004](../adr/0002-verify-totp-on-the-bigip.md)).
 
 ## The BIG-IP HA pair
 | Variable | Default | Meaning |
@@ -269,7 +269,6 @@ why they are derived from `MFA_LDAP_SCHEMA` rather than left to be set by hand.
 | Rendered artefact | Source template | Rendered by |
 |---|---|---|
 | `dns/Corefile` | [`dns/Corefile.tmpl`](../../dns/Corefile.tmpl) | `deploy.sh --stack`, via `envsubst` |
-| `keycloak/import/bigip-mgt-mfa-realm.json` | [`keycloak/bigip-mgt-mfa-realm.json.tmpl`](../../keycloak/bigip-mgt-mfa-realm.json.tmpl) | `deploy.sh --stack`, via `envsubst` then `jq` to strip the `_comment*` keys Keycloak's importer rejects |
 | `certs/ca.crt`, `certs/keycloak.*`, `certs/webtop.*`, `certs/ldap.*` | — | [`scripts/gen-certs.sh`](../../scripts/gen-certs.sh) |
 | Directory entries | [`ldap/seed.ldif`](../../ldap/seed.ldif), [`ldap/demo-users.ldif`](../../ldap/demo-users.ldif), [`ldap/acl-bigip-bind.ldif`](../../ldap/acl-bigip-bind.ldif) | `deploy.sh --stack` in bundled mode only |
 | BIG-IP objects under `/Common`, prefix `bigip-mgt-mfa` | — | [`bigip/system-auth.sh`](../../bigip/system-auth.sh) and [`bigip/apm-build.sh`](../../bigip/apm-build.sh) |
@@ -296,3 +295,28 @@ output of [cli.md](cli.md)'s validator.
 The mutable half of that list — the policy graph, its agents, the profile and the VIP — is
 enumerated once in [`bigip/lib/objects.sh`](../../bigip/lib/objects.sh) and deleted from
 that single list before every rebuild, so the build and any teardown cannot drift apart.
+
+## One-time codes
+
+### `MFA_TOTP_PERIOD`
+Type: integer (seconds). Default: `60`. Required: no.
+
+How long each one-time code is valid before it rolls. Rendered into the verification iRule at
+upload time and into the enrolment QR, so the two can never disagree.
+
+**Compatibility:** Google Authenticator ignores this value entirely and always produces
+30-second codes. At any other setting it silently generates codes that never match. FreeOTP,
+Aegis and 1Password honour it. Set `30` if Google Authenticator must be supported.
+
+### `MFA_TOTP_SKEW`
+Type: integer (steps). Default: `1`. Required: no.
+
+How many steps either side of the current one are accepted, to absorb clock drift between the
+phone and the appliance. It **multiplies** with the period: the window a code is accepted in
+is
+
+    period x (2 x skew + 1)
+
+so the defaults accept a code for **three minutes**. `0` accepts only the current step and is
+what a real deployment should run, provided NTP on the units is trustworthy. `deploy.sh`
+prints the computed window on every build rather than leaving it to be worked out.

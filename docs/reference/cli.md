@@ -335,3 +335,41 @@ that `.env` has already set.
 - [../deploy.md](../deploy.md) — the order to run them in, and what to check between steps.
 - [../operations/troubleshooting.md](../operations/troubleshooting.md) — what to do when one
   of them fails.
+
+## `scripts/enroll-totp.sh`
+
+Issues, lists and revokes the soft-token seeds that the BIG-IP verifies against. This is the
+piece a commercial MFA product would provide as a self-service portal.
+
+```bash
+scripts/enroll-totp.sh <username> [<username> ...]   # issue (or replace) a token
+scripts/enroll-totp.sh --list                        # who holds a token
+scripts/enroll-totp.sh --revoke <username>           # remove one
+```
+
+Generates a 20-byte base32 seed per user, writes it to `certs/totp-seeds.env` (mode 600,
+gitignored) and prints both a scannable QR and a typeable setup key. Re-running for a user
+replaces their seed.
+
+**It does not touch the BIG-IP.** `./deploy.sh --bigip` is what loads the seeds into the
+`bigip_mgt_mfa_totp_dg` data group. Enrolling without that step produces codes the appliance
+rejects, which is indistinguishable from a broken authenticator.
+
+Environment: reads `.env` for `MFA_TOTP_PERIOD` and `MFA_TOTP_ISSUER`. Needs `openssl`, and
+`qrencode` for the QR. Exit code 0 on success, 1 on a usage or environment error.
+
+## `scripts/test-mfa-matrix.sh`
+
+Drives real logins against the webtop and asserts the full accept/deny matrix.
+
+```bash
+scripts/test-mfa-matrix.sh
+```
+
+Seven cases: each demo user with their own correct code, and five that must be refused —
+including **a correct password paired with another user's code**. That case is the reason the
+previous Keycloak design was discarded, and no manual test thinks to try it.
+
+Generates codes on `MFA_TOTP_PERIOD`, so it stays correct when the period changes. Requires
+`oathtool`, `.env`, and enrolled seeds. Prints PASS/FAIL per case; exit code 0 when every
+case behaves as expected.

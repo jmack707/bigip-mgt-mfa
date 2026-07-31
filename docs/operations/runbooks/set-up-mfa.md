@@ -8,7 +8,7 @@ _Last validated: 2026-07-31_
 - Replacing a user's token because they lost their phone, or revoking one when they leave.
 
 The BIG-IP verifies the one-time code itself. There is no MFA server to install and nothing
-external to reach at login time — see [../../adr/0006-apm-native-totp.md](../../adr/0006-apm-native-totp.md)
+external to reach at login time — see [../../adr/0002-verify-totp-on-the-bigip.md](../../adr/0002-verify-totp-on-the-bigip.md)
 for why, and for what that trades away.
 
 ## Prerequisites

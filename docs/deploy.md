@@ -77,7 +77,7 @@ Resource Assign → Allow`, with every failure branch ending in Deny. The order 
 APM collects the password and proves it against the directory *first*, so the credential is in
 the session and can be single-signed-on into TMUI, and only then steps up to Keycloak for the
 second factor. A failed second factor denies rather than degrading to first-factor-only access.
-See [adr/0001-apm-first-auth-order.md](adr/0001-apm-first-auth-order.md).
+See [adr/0001-apm-collects-the-password.md](adr/0001-apm-collects-the-password.md).
 
 Each unit's TMUI is published behind a non-routable RFC5737 façade (`MFA_SHADOW_A`,
 `MFA_SHADOW_B`) fronted by a plain LTM virtual with a `node` iRule, because APM portal access

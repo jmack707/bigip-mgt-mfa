@@ -60,7 +60,6 @@ docker compose --profile bundled ps
 The named volumes survive, so enrolled TOTP secrets and the seeded directory carry across. That
 persistence has one consequence worth knowing: the realm is imported at container start from
 `keycloak/import/`, and a realm that already exists in the persisted store is kept as-is. If you
-edit `keycloak/bigip-mgt-mfa-realm.json.tmpl` and need the change to actually land, the realm has
 to be re-imported into an empty store — which means dropping `kcdata` and re-enrolling every
 user, so treat it as a rebuild rather than an upgrade:
 
