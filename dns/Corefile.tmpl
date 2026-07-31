@@ -3,7 +3,6 @@
 # resolver does not break the rest of its name resolution.
 ${MFA_DOMAIN}:53 {
     hosts {
-        ${MFA_HOST_IP}   ${MFA_KEYCLOAK_FQDN}
         ${MFA_APM_VIP}   ${MFA_WEBTOP_FQDN}
         fallthrough
     }

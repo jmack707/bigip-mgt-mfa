@@ -14,11 +14,9 @@ bad(){  printf '  \033[31mFAIL\033[0m  %s\n' "$*"; FAIL=$((FAIL+1)); }
 skip(){ printf '  \033[33mSKIP\033[0m  %s\n' "$*"; }
 sect(){ printf '\n\033[36m== %s ==\033[0m\n' "$*"; }
 
-KC="https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}"
-RES=(--resolve "${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}:${MFA_HOST_IP}")
 
 sect "containers"
-for c in keycloak bigip-mgt-mfa-dns; do
+for c in bigip-mgt-mfa-dns; do
   [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] \
     && ok "$c running" || bad "$c not running"
 done
@@ -28,7 +26,7 @@ if mfa_is_bundled; then
 fi
 
 sect "demo DNS zone"
-for pair in "${MFA_KEYCLOAK_FQDN}:${MFA_HOST_IP}" "${MFA_WEBTOP_FQDN}:${MFA_APM_VIP}"; do
+for pair in "${MFA_WEBTOP_FQDN}:${MFA_APM_VIP}"; do
   name="${pair%:*}"; want="${pair##*:}"
   got=$(dig +short +time=3 +tries=1 "@${MFA_HOST_IP}" -p "${MFA_DNS_PORT:-53}" "$name" 2>/dev/null | tail -1)
   [ "$got" = "$want" ] && ok "$name -> $got" || bad "$name resolved '$got', expected '$want'"
@@ -53,17 +51,6 @@ MEM=$(ldapsearch -x -LLL -H "$LDAP_URI" -D "${MFA_BIND_DN}" -w "${MFA_BIND_PW}" 
 [ "${MEM:-0}" -eq 0 ] && ok "bob.user is not in the admin group (will land read-only)" \
   || bad "bob.user IS in the admin group — the read-only half of the demo will not show"
 
-sect "Keycloak"
-DISC="${KC}/realms/${MFA_KEYCLOAK_REALM}/.well-known/openid-configuration"
-ISS=$(curl -sk "${RES[@]}" -m8 "$DISC" | jq -r '.issuer // empty')
-[ -n "$ISS" ] && ok "realm ${MFA_KEYCLOAK_REALM} published (issuer $ISS)" || bad "realm discovery failed at $DISC"
-# The issuer must equal what APM was configured with, or token validation fails with an
-# error that names neither the issuer nor the mismatch.
-[ "$ISS" = "${KC}/realms/${MFA_KEYCLOAK_REALM}" ] \
-  && ok "issuer matches the APM OAuth provider URIs" \
-  || bad "issuer '$ISS' != '${KC}/realms/${MFA_KEYCLOAK_REALM}' (check KC_HOSTNAME)"
-AUTH_EP=$(curl -sk "${RES[@]}" -m8 "$DISC" | jq -r '.authorization_endpoint // empty')
-[ -n "$AUTH_EP" ] && ok "authorization endpoint advertised" || bad "no authorization endpoint"
 
 # Preflight: is the management plane even answering? Every BIG-IP check below reads config
 # over iControl REST, and an unreachable restjavad looks EXACTLY like a missing object --

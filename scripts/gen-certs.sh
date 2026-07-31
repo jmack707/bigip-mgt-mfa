@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Mint the demo CA and the three server certs this stack presents:
 #   ldap.*      — the bundled OpenLDAP's LDAPS cert (skipped in external mode)
-#   keycloak.*  — Keycloak's HTTPS cert; the BIG-IP validates this on the OIDC token call
 #   webtop.*    — the APM VIP's cert, installed on the BIG-IP by bigip/apm-build.sh
 #
 # Every SAN must cover BOTH the name a browser uses and the address the BIG-IP uses, because
@@ -56,10 +55,6 @@ issue() {
   echo "==> ${base}.crt  $(openssl x509 -in "${base}.crt" -noout -ext subjectAltName | tail -1 | tr -d ' ')"
 }
 
-# Keycloak: browsers reach it by FQDN, the BIG-IP's OAuth server may reach it by either.
-issue keycloak "${MFA_KEYCLOAK_FQDN}" \
-  "DNS:${MFA_KEYCLOAK_FQDN},DNS:keycloak,IP:${MFA_HOST_IP}"
-
 # The APM VIP. The OIDC redirect_uri origin is this name, so the browser must trust it.
 issue webtop "${MFA_WEBTOP_FQDN}" \
   "DNS:${MFA_WEBTOP_FQDN},IP:${MFA_APM_VIP}"
@@ -77,8 +72,8 @@ issue ldap "openldap.${MFA_DOMAIN:-bigip-mgt-mfa.lab}" \
 
 # OpenLDAP gets its OWN copy of what it needs, in its own directory. The osixia image
 # chowns whatever certs directory it is handed, on every start -- sharing one directory
-# means it eventually owns keycloak.key too, and Keycloak then dies on restart with
-# AccessDeniedException. Start ordering hides this until something reboots.
+# means it eventually owns webtop.key and the CA key too, and anything else reading them
+# starts failing with AccessDeniedException. Start ordering hides this until a reboot.
 mkdir -p ldap-certs
 cp -f ldap.crt ldap.key ca.crt ldap-certs/
 chmod 0644 ldap-certs/ldap.crt ldap-certs/ca.crt

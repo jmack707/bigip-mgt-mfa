@@ -1,35 +1,5 @@
 name: bigip-mgt-mfa   # compose project name → volumes are prefixed bigip-mgt-mfa_ (not the dir name)
 services:
-  keycloak:
-    # The second factor. APM authenticates the password against the directory itself and
-    # then steps up to this for TOTP, so Keycloak federates the SAME directory read-only
-    # (realm import) and never becomes a second password store.
-    #
-    # start-dev, not start: production mode requires an external database, and the whole
-    # point of this repo is that `docker compose up` reproduces the demo anywhere. The H2
-    # store is persisted in the kcdata volume so enrolled TOTP secrets survive a restart.
-    # See docs/adr/0004-keycloak-dev-mode.md.
-    image: quay.io/keycloak/keycloak:26.4
-    container_name: keycloak
-    restart: unless-stopped
-    command: start-dev --import-realm
-    environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: "${MFA_KEYCLOAK_ADMIN:-admin}"
-      KC_BOOTSTRAP_ADMIN_PASSWORD: "${MFA_KEYCLOAK_ADMIN_PW}"
-      # Fixed issuer. APM validates the issuer in the returned token against exactly this
-      # string, so it must not float with the request Host header.
-      KC_HOSTNAME: "https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}"
-      KC_HOSTNAME_STRICT: "false"
-      KC_HTTPS_CERTIFICATE_FILE: /certs/keycloak.crt
-      KC_HTTPS_CERTIFICATE_KEY_FILE: /certs/keycloak.key
-      KC_HTTP_ENABLED: "true"
-      KC_HEALTH_ENABLED: "true"
-    ports: ["${MFA_KEYCLOAK_PORT:-8443}:8443"]
-    volumes:
-      - ./certs:/certs:ro
-      - ./keycloak/import:/opt/keycloak/data/import:ro
-      - kcdata:/opt/keycloak/data
-
   dns:
     # Why a DNS server is part of this stack: the BIG-IP's APM OAuth client resolves the
     # Keycloak FQDN through a TMOS dns-resolver, which does its own lookups in TMM and does
@@ -56,7 +26,7 @@ services:
     # Only starts with the `bundled` profile (MFA_DIRECTORY_MODE=bundled, the default).
     # In external mode bigip-mgt-mfa talks to your AD/LDAP instead and this never runs:
     #   docker compose --profile bundled up -d   # bundled
-    #   docker compose up -d                     # external — keycloak + dns only
+    #   docker compose up -d                     # external — dns only
     profiles: ["bundled"]
     image: osixia/openldap:1.5.0
     container_name: openldap
@@ -74,7 +44,7 @@ services:
       LDAP_TLS_VERIFY_CLIENT: "never"
     volumes:
       # Its OWN directory, not the shared certs/: osixia chowns this at every start, and
-      # sharing it eventually makes keycloak.key unreadable by Keycloak. NOT :ro.
+      # sharing it would eventually make the other keys unreadable. NOT :ro.
       - ./ldap-certs:/container/service/slapd/assets/certs
       - ldapdata:/var/lib/ldap
       - ldapconf:/etc/ldap/slapd.d
@@ -82,4 +52,3 @@ services:
 volumes:
   ldapdata:
   ldapconf:
-  kcdata:

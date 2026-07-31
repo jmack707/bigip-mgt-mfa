@@ -71,8 +71,9 @@ when ACCESS_POLICY_AGENT_EVENT {
 
         # --- compare against this step and its immediate neighbours ---
         set step [expr {[clock seconds] / ${MFA_TOTP_PERIOD}}]
+        set skew ${MFA_TOTP_SKEW}
         set ok 0
-        for { set d -1 } { $d <= 1 } { incr d } {
+        for { set d [expr {0 - $skew}] } { $d <= $skew } { incr d } {
             set ctr [expr {$step + $d}]
             set msg [binary format W $ctr]
             set mac [CRYPTO::sign -alg hmac-sha1 -key $key $msg]

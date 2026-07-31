@@ -137,6 +137,11 @@ while IFS= read -r o; do td "$B/mgmt/tm/${o}"; done < <(mfa_apm_objects "$P" "$P
 step "3. AAA LDAP server (password check happens here, by BIND)"
 # TMOS 21.x APM AAA LDAP requires a server POOL — a bare address is rejected. Single-quote
 # wrap so the DN commas pass through tmsh intact.
+# Delete first: `tmsh create` is not idempotent and silently keeps the EXISTING object when
+# one is already there. Anything that changes in .env afterwards -- the bind DN, the search
+# base, the directory address -- is then ignored forever, and the failure surfaces much later
+# as "Failed to bind ... Invalid credentials" naming a DN that is no longer in any config file.
+bash_cmd "tmsh delete apm aaa ldap ${AAA} 2>/dev/null; tmsh delete ltm pool ${AAA}-pool 2>/dev/null; true"
 bash_cmd "tmsh create ltm pool ${AAA}-pool { members add { ${MFA_LDAP_HOST}:${MFA_LDAP_PORT} } monitor tcp } ; tmsh create apm aaa ldap ${AAA} { pool ${AAA}-pool port ${MFA_LDAP_PORT} admin-dn \"${MFA_BIND_DN}\" admin-encrypted-password \"${MFA_BIND_PW}\" base-dn \"${MFA_USER_SEARCH_BASE}\" }"
 
 step "4. TOTP seed store"
@@ -162,8 +167,16 @@ add "$B/mgmt/tm/ltm/data-group/internal" "$(jq -n --argjson r "$RECORDS" '{name:
 step "5. TOTP verification iRule"
 curl "${A[@]}" -o /dev/null -w "  DEL previous rule -> %{http_code}\n" -X DELETE "$B/mgmt/tm/ltm/rule/~${PART}~${P}-totp-verify"
 # envsubst restricted to our one placeholder so the iRule's own $vars survive untouched.
-TOTP_RULE="$(MFA_TOTP_PERIOD="${MFA_TOTP_PERIOD:-60}" envsubst '${MFA_TOTP_PERIOD}' < "${HERE}/apm-totp-verify.irule")"
-echo "  TOTP step: ${MFA_TOTP_PERIOD:-60}s"
+# Both placeholders must be listed. envsubst leaves anything unlisted untouched, and an
+# unsubstituted ${MFA_TOTP_SKEW} is still VALID Tcl -- it reads a variable of that literal
+# name -- so the rule compiles, uploads, reports success, and then fails at runtime on every
+# login. It does not fail loudly anywhere.
+TOTP_RULE="$(MFA_TOTP_PERIOD="${MFA_TOTP_PERIOD:-60}" MFA_TOTP_SKEW="${MFA_TOTP_SKEW:-1}" \
+  envsubst '${MFA_TOTP_PERIOD} ${MFA_TOTP_SKEW}' < "${HERE}/apm-totp-verify.irule")"
+case "$TOTP_RULE" in
+  *'${MFA_'*) echo "  ERROR: a placeholder survived envsubst in the TOTP iRule" >&2; exit 1 ;;
+esac
+echo "  TOTP step ${MFA_TOTP_PERIOD:-60}s, skew +/-${MFA_TOTP_SKEW:-1} => a code is accepted for $(( ${MFA_TOTP_PERIOD:-60} * (2 * ${MFA_TOTP_SKEW:-1} + 1) ))s"
 add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-totp-verify" --arg b "$TOTP_RULE" '{name:$n,partition:"Common",apiAnonymous:$b}')"
 
 step "6. customization groups"

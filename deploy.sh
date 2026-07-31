@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bigip-mgt-mfa deployer. Two halves, deliberately separable:
 #
-#   ./deploy.sh --stack    Keycloak + the directory, in Docker. Touches NO BIG-IP. Prove
+#   ./deploy.sh --stack    the directory + DNS, in Docker. Touches NO BIG-IP. Prove
 #                          this half works before pointing anything at your appliances.
 #   ./deploy.sh --bigip    the BIG-IP half: trust anchors, remote-role on both units, and
 #                          the APM access policy on unit A (config-sync carries it
@@ -42,24 +42,12 @@ if [ "$DO_STACK" = 1 ]; then
   say "directory model"
   mfa_directory_summary
 
-  say "certificates (CA, Keycloak, webtop VIP$(mfa_is_bundled && echo ", LDAPS"))"
+  say "certificates (CA, webtop VIP$(mfa_is_bundled && echo ", LDAPS"))"
   scripts/gen-certs.sh
 
   say "rendering the demo DNS zone"
   envsubst < dns/Corefile.tmpl > dns/Corefile
-  echo "  ${MFA_KEYCLOAK_FQDN} -> ${MFA_HOST_IP};  ${MFA_WEBTOP_FQDN} -> ${MFA_APM_VIP}"
-
-  say "rendering the Keycloak realm"
-  mkdir -p keycloak/import
-  # Two transforms. envsubst fills our placeholders (the realm JSON has no other $ syntax to
-  # protect). jq then strips every "_comment*" key: the template carries its rationale inline
-  # where the config is, but Keycloak's importer rejects unknown fields outright rather than
-  # ignoring them, so the comments must not reach it.
-  envsubst < keycloak/bigip-mgt-mfa-realm.json.tmpl \
-    | jq 'walk(if type == "object" then with_entries(select(.key | startswith("_comment") | not)) else . end)' \
-    > keycloak/import/bigip-mgt-mfa-realm.json \
-    || die "rendered realm is not valid JSON — check for unset variables in .env"
-  echo "  keycloak/import/bigip-mgt-mfa-realm.json"
+  echo "  ${MFA_WEBTOP_FQDN} -> ${MFA_APM_VIP}"
 
   say "starting containers"
   if mfa_is_bundled; then
@@ -68,8 +56,8 @@ if [ "$DO_STACK" = 1 ]; then
     docker compose up -d
   fi
 
-  # `up -d` will not recreate a service whose definition has not changed, and Keycloak and
-  # OpenLDAP read their certificate files once at process start. So when gen-certs.sh has
+  # `up -d` will not recreate a service whose definition has not changed, and OpenLDAP reads
+  # its certificate files once at process start. So when gen-certs.sh has
   # actually re-issued a leaf certificate, the running containers are still serving the old
   # one and must be restarted explicitly — otherwise the CA on disk and the certificate on
   # the wire disagree, and the BIG-IP's back-channel validation fails for reasons nothing
@@ -77,9 +65,7 @@ if [ "$DO_STACK" = 1 ]; then
   if [ -f certs/.reissued ]; then
     say "certificates were re-issued — restarting the services that present them"
     if mfa_is_bundled; then
-      docker compose --profile bundled restart keycloak openldap
-    else
-      docker compose restart keycloak
+      docker compose --profile bundled restart openldap
     fi
     rm -f certs/.reissued
   fi
@@ -110,27 +96,8 @@ if [ "$DO_STACK" = 1 ]; then
     echo "  validate reachability and the bind first: scripts/preflight-directory.sh"
   fi
 
-  say "waiting for Keycloak"
-  KC="https://${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}"
-  DISC="${KC}/realms/${MFA_KEYCLOAK_REALM}/.well-known/openid-configuration"
-  ok=0
-  for i in $(seq 1 60); do
-    if curl -sk --resolve "${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}:${MFA_HOST_IP}" -m5 "$DISC" | jq -e .issuer >/dev/null 2>&1; then
-      ok=1; break
-    fi
-    sleep 5
-  done
-  [ "$ok" = 1 ] || die "Keycloak did not publish the ${MFA_KEYCLOAK_REALM} realm — 'docker compose logs keycloak'"
-  echo "  issuer: $(curl -sk --resolve "${MFA_KEYCLOAK_FQDN}:${MFA_KEYCLOAK_PORT}:${MFA_HOST_IP}" -m5 "$DISC" | jq -r .issuer)"
-
-  say "reconciling the realm"
-  # --import-realm only applies on first creation, so without this a redeploy would run
-  # against the realm as it was and template edits would appear to do nothing.
-  scripts/kc-reconcile.sh
-
   say "stack ready"
-  echo "  Keycloak admin console: ${KC}/admin/  (${MFA_KEYCLOAK_ADMIN})"
-  echo "  Users enrol an authenticator at: ${KC}/realms/${MFA_KEYCLOAK_REALM}/account"
+  echo "  Enrol a user's authenticator: ./scripts/enroll-totp.sh <username>"
   echo "  Next: ./deploy.sh --bigip"
 fi
 
