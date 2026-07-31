@@ -249,4 +249,13 @@ concluding otherwise:
 curl -sk -o /dev/null -w '%{http_code}\n' https://<MFA_APM_VIP>/
 ```
 
-`validate.sh` gates its configuration checks on a reachability probe for this reason.
+`validate.sh` gates its configuration checks on a reachability probe for this reason — but
+that probe runs **once**, before the BIG-IP section. If `restjavad` is answering at that
+moment and wedges part-way through, the later checks still report as configuration failures.
+Known limitation, tracked as
+[issue #4](https://github.com/jmack707/bigip-mgt-mfa/issues/4).
+
+If a run reports failures that make no sense, confirm with `f5.sh status` and with
+`scripts/test-mfa-matrix.sh`, which drives the data plane and is unaffected by the management
+plane being down. Seven passes there means authentication is working regardless of what the
+configuration checks claim.
