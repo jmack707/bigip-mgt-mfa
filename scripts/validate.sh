@@ -87,6 +87,17 @@ else
   [ -n "$APB" ] && ok "access profile synced to B" || bad "access profile NOT on B — run a config-sync"
   RES_N=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/resource/portal-access" | jq -r '[.items[]?|select(.name|startswith("warden-lite-bigip"))]|length')
   [ "${RES_N:-0}" = 2 ] && ok "two portal resources (one per unit)" || bad "expected 2 portal resources, found ${RES_N:-0}"
+  # A portal resource can exist, publish and rewrite perfectly while carrying NO SSO
+  # configuration: passing sso inside items.item1 on a REST create returns 200 and is then
+  # silently dropped. The user gets a working webtop that immediately asks them to log in
+  # again -- the one thing this demo exists to avoid -- so assert it rather than assume it.
+  for r in bigip-a bigip-b; do
+    # The /items SUB-COLLECTION, not the parent object: the parent's representation omits
+    # nested item fields entirely and reports sso as null even when it is correctly set.
+    # Reading the parent produces a convincing false alarm.
+    SSO=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/resource/portal-access/~Common~warden-lite-${r}-tmui/items" | jq -r '.items[0].sso // empty')
+    [ -n "$SSO" ] && ok "${r} portal resource has form SSO attached" || bad "${r} portal resource has NO SSO — the webtop will ask for a second login"
+  done
   VS=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/ltm/virtual/~Common~warden-lite-vs" | jq -r '.destination // empty')
   [ -n "$VS" ] && ok "webtop virtual server $VS" || bad "webtop virtual server missing"
 fi

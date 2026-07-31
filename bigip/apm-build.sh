@@ -50,8 +50,18 @@ add(){ # add <url> <json> — additive POST tolerating 409
   case "$code" in 200|201|409) ;; *) echo "    $(cat /tmp/wl-apm.out)"; return 1;; esac
 }
 bash_cmd(){ # bash_cmd <tmsh-or-shell> — run via /tm/util/bash, print commandResult
-  curl "${A[@]}" -X POST -H 'Content-Type: application/json' "$B/mgmt/tm/util/bash" \
-    -d "$(jq -n --arg u "-c '$1'" '{command:"run",utilCmdArgs:$u}')" | jq -r '.commandResult // "  (ok)"'
+  # tmsh reports errors in commandResult with a 200 on the wire, so a naive caller sees
+  # success. Surface anything that looks like an error loudly: a silently-skipped tmsh
+  # command is how the portal headers went missing while the build claimed to work.
+  local out
+  out=$(curl "${A[@]}" -X POST -H 'Content-Type: application/json' "$B/mgmt/tm/util/bash" \
+        -d "$(jq -n --arg u "-c '$1'" '{command:"run",utilCmdArgs:$u}')" | jq -r '.commandResult // ""')
+  [ -n "$out" ] && echo "$out"
+  case "$out" in
+    *"Syntax Error"*|*"was not found"*|*"01020036"*|*"is not allowed"*)
+      echo "    ^^ tmsh REJECTED that command" >&2 ;;
+  esac
+  return 0
 }
 upload(){ # upload <local-file> <remote-name>
   local sz; sz=$(stat -c%s "$1")
@@ -194,11 +204,15 @@ mk_portal(){ # mk_portal <name> <facade-ip> <acl-order> <caption>
     '{name:$n,partition:"Common",aclOrder:$o,publishOnWebtop:"true",caption:$c,
       applicationUri:("https://"+$h+"/tmui/login.jsp"),
       items:{item1:{host:$h,paths:"/*",scheme:"https",port:443,sso:$sso}}}')"
-  # destipaddr steers the portal engine to the façade; referer satisfies TMUI login.jsp CSRF.
-  # Both are header_data_t values the REST body cannot express, so tmsh sets them.
-  # caption is what the user actually reads on the webtop tile; it does not take via the
-  # REST body, so set it here alongside the headers.
-  bash_cmd "tmsh modify apm resource portal-access $1 caption \"$4\" items modify { item1 { headers { { name destipaddr value $2 } { name referer value https://$2:443 } } } }"
+  # Two SEPARATE tmsh commands, deliberately. Combining them fails: the caption contains
+  # parentheses ("BIG-IP A (TMUI)") which break the parse of the whole line, and because
+  # bash_cmd never inspected an exit code the failure was invisible -- the headers silently
+  # went unset while the build reported success.
+  bash_cmd "tmsh modify apm resource portal-access $1 caption '$4'"
+  # sso AND headers in ONE items-modify: an items-modify replaces the item's block, so
+  # setting one of them alone wipes the other. destipaddr steers the portal engine to the
+  # facade; referer satisfies TMUI login.jsp CSRF.
+  bash_cmd "tmsh modify apm resource portal-access $1 items modify { item1 { sso /$PART/${P}-tmui-sso headers replace-all-with { destipaddr { name destipaddr value $2 } referer { name referer value https://$2:443 } } } }"
 }
 mk_portal "${P}-bigip-a-tmui" "$SHADOW_A" 1 "BIG-IP A (TMUI)"
 mk_portal "${P}-bigip-b-tmui" "$SHADOW_B" 2 "BIG-IP B (TMUI)"
