@@ -282,3 +282,50 @@ is
 so the defaults accept a code for **three minutes**. `0` accepts only the current step and is
 what a real deployment should run, provided NTP on the units is trustworthy. `deploy.sh`
 prints the computed window on every build rather than leaving it to be worked out.
+
+## Demo principals and roles
+
+The bundled directory seeds four principals whose *only* difference is group membership.
+That single difference is what the demo makes visible: each lands in TMUI with a different
+role, decided by the target BIG-IP rather than by the access policy.
+
+| User | Group | TMOS role | Console |
+|---|---|---|---|
+| `alice.admin` | `bigip-admins` | Administrator | tmsh |
+| `carol.netops` | `bigip-operators` | Operator | disabled |
+| `dave.audit` | `bigip-auditors` | Auditor | disabled |
+| `bob.user` | *(none)* | Guest — the default | disabled |
+
+Only the administrator gets a shell. A console is a configuration channel whatever the GUI
+role permits, so handing one to a read-only role would quietly undo the distinction.
+
+### `MFA_PW_ALICE`, `MFA_PW_CAROL`, `MFA_PW_DAVE`, `MFA_PW_BOB`
+Type: string. Default: falls back to `MFA_TEST_USER_PW`. Required: bundled mode only.
+
+One password per demo principal. This matters more than it looks: with a shared password the
+per-user attribution story rests on the honour system, because a directory cannot distinguish
+two people who present the same credential. Distinct passwords are what make
+`test-mfa-matrix.sh` able to assert that *alice's username with bob's password is denied* —
+an assertion that cannot exist otherwise.
+
+The fallback to `MFA_TEST_USER_PW` exists so an older `.env` keeps working; setting the
+per-user values is strongly preferred.
+
+Ignored entirely in external mode, where people already have their own directory passwords.
+
+### `MFA_OPERATOR_GROUP_DN`, `MFA_AUDITOR_GROUP_DN`
+Type: LDAP DN. Default: `cn=bigip-operators,ou=groups,${BASE_DN}` and
+`cn=bigip-auditors,ou=groups,${BASE_DN}`. Required: no.
+
+The groups whose members are granted the Operator and Auditor roles. Point them at existing
+groups when using your own directory; the names need not match ours.
+
+### `MFA_OPERATOR_ROLE_ATTRIBUTE`, `MFA_AUDITOR_ROLE_ATTRIBUTE`
+Type: string. Default: `memberOf=<the corresponding group DN>`. Required: no.
+
+The exact attribute comparison each `remote-role` rule performs. Override only if your
+directory expresses membership differently — Active Directory nested groups, for instance,
+may need a matching rule rather than a literal `memberOf`.
+
+Rules are evaluated in `lineOrder`, most privileged first, so a user in two groups receives
+the higher role rather than whichever rule happened to be evaluated last.
