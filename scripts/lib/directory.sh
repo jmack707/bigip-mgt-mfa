@@ -67,6 +67,25 @@ else
 fi
 
 
+# Three groups, three TMOS roles, plus the default. One group would demonstrate a boolean;
+# a spectrum is what an operations team actually has, and it makes "the BIG-IP decides, from
+# the directory" visible rather than asserted.
+MFA_OPERATOR_GROUP_DN="${MFA_OPERATOR_GROUP_DN:-cn=bigip-operators,ou=groups,${BASE_DN}}"
+MFA_AUDITOR_GROUP_DN="${MFA_AUDITOR_GROUP_DN:-cn=bigip-auditors,ou=groups,${BASE_DN}}"
+MFA_OPERATOR_ROLE_ATTRIBUTE="${MFA_OPERATOR_ROLE_ATTRIBUTE:-memberOf=${MFA_OPERATOR_GROUP_DN}}"
+MFA_AUDITOR_ROLE_ATTRIBUTE="${MFA_AUDITOR_ROLE_ATTRIBUTE:-memberOf=${MFA_AUDITOR_GROUP_DN}}"
+
+# Per-user demo passwords. MFA_TEST_USER_PW remains the fallback so an existing .env keeps
+# working, but each principal having its own is what makes per-user attribution provable.
+MFA_PW_ALICE="${MFA_PW_ALICE:-${MFA_TEST_USER_PW:-}}"
+MFA_PW_BOB="${MFA_PW_BOB:-${MFA_TEST_USER_PW:-}}"
+MFA_PW_CAROL="${MFA_PW_CAROL:-${MFA_TEST_USER_PW:-}}"
+MFA_PW_DAVE="${MFA_PW_DAVE:-${MFA_TEST_USER_PW:-}}"
+
+export MFA_OPERATOR_GROUP_DN MFA_AUDITOR_GROUP_DN \
+       MFA_OPERATOR_ROLE_ATTRIBUTE MFA_AUDITOR_ROLE_ATTRIBUTE \
+       MFA_PW_ALICE MFA_PW_BOB MFA_PW_CAROL MFA_PW_DAVE
+
 export MFA_DIRECTORY_MODE MFA_LDAP_HOST MFA_LDAP_PORT MFA_LDAPS_PORT MFA_LDAP_SCHEMA \
        MFA_BIND_DN MFA_USER_SEARCH_BASE MFA_LOGIN_ATTR \
        MFA_ADMIN_GROUP_DN MFA_ADMIN_ROLE_ATTRIBUTE \

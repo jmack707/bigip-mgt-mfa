@@ -85,14 +85,26 @@ fi
 req PATCH "$B/mgmt/tm/auth/remote-user" \
   '{"defaultRole":"guest","remoteConsoleAccess":"disabled"}' >/dev/null
 
-# 4. the one rule: members of the admin group are elevated to administrator. This is alice.
-RR_BODY="$(jq -n --arg a "${MFA_ADMIN_ROLE_ATTRIBUTE}" \
-  '{name:"bigip_mgt_mfa_admins",attribute:$a,role:"administrator",userPartition:"All",console:"tmsh",lineOrder:1}')"
-if curl "${AUTH[@]}" "$B/mgmt/tm/auth/remote-role/role-info/bigip_mgt_mfa_admins" | jqok '.name'; then
-  req PATCH "$B/mgmt/tm/auth/remote-role/role-info/bigip_mgt_mfa_admins" "$RR_BODY" >/dev/null
-else
-  req POST  "$B/mgmt/tm/auth/remote-role/role-info" "$RR_BODY" >/dev/null
-fi
+# 4. the role rules. Each maps one directory group to one TMOS role; anyone matching none of
+# them falls through to the guest default set above. lineOrder is the evaluation order, so
+# the most privileged rule is checked first -- someone in both admins and operators gets
+# administrator rather than whichever rule happened to be evaluated last.
+#
+# Only console access differs deliberately: administrators get tmsh, the read-only roles do
+# not, because a shell is a configuration channel regardless of what the GUI role permits.
+rr(){ # rr <name> <attribute> <role> <lineOrder> <console>
+  local body
+  body="$(jq -n --arg n "$1" --arg a "$2" --arg r "$3" --argjson o "$4" --arg c "$5" \
+    '{name:$n,attribute:$a,role:$r,userPartition:"All",console:$c,lineOrder:$o}')"
+  if curl "${AUTH[@]}" "$B/mgmt/tm/auth/remote-role/role-info/$1" | jqok '.name'; then
+    req PATCH "$B/mgmt/tm/auth/remote-role/role-info/$1" "$body" >/dev/null
+  else
+    req POST  "$B/mgmt/tm/auth/remote-role/role-info" "$body" >/dev/null
+  fi
+}
+rr bigip_mgt_mfa_admins    "${MFA_ADMIN_ROLE_ATTRIBUTE}"    administrator 1 tmsh
+rr bigip_mgt_mfa_operators "${MFA_OPERATOR_ROLE_ATTRIBUTE}" operator      2 disabled
+rr bigip_mgt_mfa_auditors  "${MFA_AUDITOR_ROLE_ATTRIBUTE}"  auditor       3 disabled
 
 # 5. switch the auth source. admin/root stay local.
 req PATCH "$B/mgmt/tm/auth/source" '{"type":"ldap"}' >/dev/null
@@ -110,4 +122,5 @@ for attempt in 1 2 3 4 5; do
   sleep 6
 done
 [ "$saved" = 1 ] || echo "    WARNING: config is live but was not saved to disk on ${BIGIP_MGMT}" >&2
-echo "    ${BIGIP_MGMT}: remote auth -> ${MFA_LDAP_HOST}, admins = ${MFA_ADMIN_ROLE_ATTRIBUTE}"
+echo "    ${BIGIP_MGMT}: remote auth -> ${MFA_LDAP_HOST}"
+echo "      admins=administrator  operators=operator  auditors=auditor  default=guest"
