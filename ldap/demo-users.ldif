@@ -1,17 +1,41 @@
-# The two demo principals. They differ in exactly one way — membership in the admin group —
-# and that single difference is what the demo makes visible: alice lands in TMUI as
-# Administrator, bob lands in the same TMUI as read-only. Neither APM nor Keycloak decides
-# that; the target BIG-IP's remote-role does, from memberOf.
+# The demo principals. They differ ONLY in group membership, and that single difference is
+# what the demo makes visible: each lands in TMUI with a different role, decided by the target
+# BIG-IP's remote-role from memberOf. Neither APM nor the access policy decides it.
 #
-# Applied AFTER ldap/memberof-overlay.ldif, or memberOf is never populated and everyone
-# falls through to the read-only default role.
+#   alice.admin    bigip-admins      -> Administrator   (full configuration)
+#   carol.netops   bigip-operators   -> Operator        (enable/disable, no config change)
+#   dave.audit     bigip-auditors    -> Auditor         (read-only + audit log)
+#   bob.user       (no group)        -> Guest           (the default; read-only)
+#
+# Each has their OWN password. A shared demo password makes the per-user attribution story
+# rest on the honour system -- a directory cannot tell two people apart if they present the
+# same credential, and "alice is an administrator and bob is not" stops being demonstrable.
+#
+# Applied AFTER ldap/memberof-overlay.ldif, or memberOf is never populated and everyone falls
+# through to the default role.
 dn: uid=alice.admin,${MFA_USER_SEARCH_BASE}
 objectClass: inetOrgPerson
 uid: alice.admin
 cn: Alice Admin
 sn: Admin
 mail: alice.admin@${MFA_DOMAIN}
-userPassword: ${MFA_TEST_USER_PW}
+userPassword: ${MFA_PW_ALICE}
+
+dn: uid=carol.netops,${MFA_USER_SEARCH_BASE}
+objectClass: inetOrgPerson
+uid: carol.netops
+cn: Carol Netops
+sn: Netops
+mail: carol.netops@${MFA_DOMAIN}
+userPassword: ${MFA_PW_CAROL}
+
+dn: uid=dave.audit,${MFA_USER_SEARCH_BASE}
+objectClass: inetOrgPerson
+uid: dave.audit
+cn: Dave Audit
+sn: Audit
+mail: dave.audit@${MFA_DOMAIN}
+userPassword: ${MFA_PW_DAVE}
 
 dn: uid=bob.user,${MFA_USER_SEARCH_BASE}
 objectClass: inetOrgPerson
@@ -19,10 +43,22 @@ uid: bob.user
 cn: Bob User
 sn: User
 mail: bob.user@${MFA_DOMAIN}
-userPassword: ${MFA_TEST_USER_PW}
+userPassword: ${MFA_PW_BOB}
 
-# groupOfNames requires at least one member at creation, so alice is seeded inline.
+# groupOfNames requires at least one member at creation, so each group is seeded with its
+# member inline. bob deliberately belongs to nothing -- he is the default-role case, and the
+# proof that authorization is granted rather than assumed.
 dn: ${MFA_ADMIN_GROUP_DN}
 objectClass: groupOfNames
 cn: bigip-admins
 member: uid=alice.admin,${MFA_USER_SEARCH_BASE}
+
+dn: ${MFA_OPERATOR_GROUP_DN}
+objectClass: groupOfNames
+cn: bigip-operators
+member: uid=carol.netops,${MFA_USER_SEARCH_BASE}
+
+dn: ${MFA_AUDITOR_GROUP_DN}
+objectClass: groupOfNames
+cn: bigip-auditors
+member: uid=dave.audit,${MFA_USER_SEARCH_BASE}

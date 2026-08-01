@@ -6,6 +6,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 _PASS_IN="${BIGIP_PASS:-}"; set -a; . "${HERE}/../.env"; set +a
 # shellcheck disable=SC1091
 . "${HERE}/lib/directory.sh"
+
+# demo_pw <user> — the per-user demo password, falling back to the shared one so an older
+# .env that only sets MFA_TEST_USER_PW still works.
+demo_pw(){
+  case "$1" in
+    alice.admin)  printf '%s' "${MFA_PW_ALICE:-${MFA_TEST_USER_PW:-}}" ;;
+    bob.user)     printf '%s' "${MFA_PW_BOB:-${MFA_TEST_USER_PW:-}}" ;;
+    carol.netops) printf '%s' "${MFA_PW_CAROL:-${MFA_TEST_USER_PW:-}}" ;;
+    dave.audit)   printf '%s' "${MFA_PW_DAVE:-${MFA_TEST_USER_PW:-}}" ;;
+    *)            printf '%s' "${MFA_TEST_USER_PW:-}" ;;
+  esac
+}
 [ -n "$_PASS_IN" ] && BIGIP_PASS="$_PASS_IN"
 
 FAIL=0
@@ -39,7 +51,9 @@ ldapwhoami -x -H "$LDAP_URI" -D "${MFA_BIND_DN}" -w "${MFA_BIND_PW}" >/dev/null 
 # The demo's whole authorization story in two assertions: alice is in the admin group and
 # bob is not. If these are wrong, the TMUI role outcome is wrong too.
 for u in alice.admin bob.user; do
-  ldapwhoami -x -H "$LDAP_URI" -D "${MFA_LOGIN_ATTR}=${u},${MFA_USER_SEARCH_BASE}" -w "${MFA_TEST_USER_PW}" >/dev/null 2>&1 \
+  # Each principal has its OWN password now; using a shared one here would pass for the
+  # wrong reason and hide the very thing the per-user passwords exist to prove.
+  ldapwhoami -x -H "$LDAP_URI" -D "${MFA_LOGIN_ATTR}=${u},${MFA_USER_SEARCH_BASE}" -w "$(demo_pw "$u")" >/dev/null 2>&1 \
     && ok "$u can bind with the demo password" || bad "$u cannot bind"
 done
 MEM=$(ldapsearch -x -LLL -H "$LDAP_URI" -D "${MFA_BIND_DN}" -w "${MFA_BIND_PW}" \
@@ -138,21 +152,26 @@ else
   # role legitimately cannot use iControl REST, so a read-only user returns 401 to curl and
   # a status-code test would read that as "broken" when it is exactly right. The audit line
   # records the role TMOS actually assigned.
-  probe_role(){ # probe_role <unit> <user>
-    curl -sk -m10 -o /dev/null -u "${2}:${MFA_TEST_USER_PW}" "https://${1}/mgmt/tm/sys/version" 2>/dev/null
+  probe_role(){ # probe_role <unit> <user> <password>
+    curl -sk -m10 -o /dev/null -u "${2}:${3}" "https://${1}/mgmt/tm/sys/version" 2>/dev/null
     sleep 3
     curl -sk -m10 -u "${BIGIP_USER}:${BIGIP_PASS}" -X POST -H 'Content-Type: application/json' \
       "https://${1}/mgmt/tm/util/bash" \
       -d "{\"command\":\"run\",\"utilCmdArgs\":\"-c \\\"grep pam_audit /var/log/secure | grep ${2} | tail -1\\\"\"}" \
       | jq -r '.commandResult // ""' | grep -oE 'level=[A-Za-z]+' | tail -1 | cut -d= -f2
   }
+  # Four principals, four roles, each with their OWN password -- so this also proves the
+  # directory is distinguishing people rather than accepting one shared credential.
   for unit in "${UNITS[@]}"; do
-    R=$(probe_role "$unit" alice.admin)
-    [ "$R" = Administrator ] && ok "$unit: alice.admin -> Administrator" \
-      || bad "$unit: alice.admin got '${R:-unknown}', expected Administrator (is checkRolesGroup enabled?)"
-    R=$(probe_role "$unit" bob.user)
-    [ "$R" = Guest ] && ok "$unit: bob.user -> Guest (read-only)" \
-      || bad "$unit: bob.user got '${R:-unknown}', expected Guest"
+    for spec in "alice.admin:${MFA_PW_ALICE}:Administrator" \
+                "carol.netops:${MFA_PW_CAROL}:Operator" \
+                "dave.audit:${MFA_PW_DAVE}:Auditor" \
+                "bob.user:${MFA_PW_BOB}:Guest"; do
+      u="${spec%%:*}"; rest="${spec#*:}"; pw="${rest%%:*}"; want="${rest##*:}"
+      R=$(probe_role "$unit" "$u" "$pw")
+      [ "$R" = "$want" ] && ok "$unit: $u -> $want" \
+        || bad "$unit: $u got '${R:-unknown}', expected $want (is checkRolesGroup enabled?)"
+    done
   done
 fi
 
@@ -175,7 +194,7 @@ esac
 # So: log in for real, open a portal resource, and assert that what comes back is the TMUI
 # application rather than its login page.
 sect "single sign-on (behaviour, not configuration)"
-if [ -z "${MFA_TEST_USER_PW:-}" ] || [ ! -s "${HERE}/../certs/totp-seeds.env" ]; then
+if [ -z "$(demo_pw "${MFA_SSO_TEST_USER:-alice.admin}")" ] || [ ! -s "${HERE}/../certs/totp-seeds.env" ]; then
   skip "no demo credentials or TOTP seeds — cannot drive a real login"
 elif ! command -v oathtool >/dev/null 2>&1; then
   skip "oathtool not installed — cannot generate a one-time code"
@@ -191,7 +210,7 @@ else
     curl "${C[@]}" -o /dev/null -m10 "https://${MFA_WEBTOP_FQDN}/" 2>/dev/null
     curl "${C[@]}" -L -o /dev/null -m10 "https://${MFA_WEBTOP_FQDN}/my.policy" 2>/dev/null
     PAGE=$(curl "${C[@]}" -L -m20 -d "username=${SSO_USER}" \
-             --data-urlencode "password=${MFA_TEST_USER_PW}" \
+             --data-urlencode "password=$(demo_pw "$SSO_USER")" \
              -d "otp=${OTP}" -d vhost=standard \
              "https://${MFA_WEBTOP_FQDN}/my.policy" 2>/dev/null)
     if ! grep -q '"webtop"' <<<"$PAGE"; then

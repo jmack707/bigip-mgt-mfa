@@ -34,12 +34,13 @@ try() { # try <label> <user> <password> <otp> <expect: GRANT|DENY>
 
 echo
 echo "=== single logon page: username + password + one-time code ==="
-try "alice: correct pw + her own OTP"      alice.admin "$MFA_TEST_USER_PW" "$("${OATH[@]}" "$A_SEC")" GRANT
-try "bob:   correct pw + his own OTP"      bob.user    "$MFA_TEST_USER_PW" "$("${OATH[@]}" "$B_SEC")" GRANT
+try "alice: correct pw + her own OTP"      alice.admin "$MFA_PW_ALICE" "$("${OATH[@]}" "$A_SEC")" GRANT
+try "bob:   correct pw + his own OTP"      bob.user    "$MFA_PW_BOB" "$("${OATH[@]}" "$B_SEC")" GRANT
 echo
 echo "=== the cases that must fail ==="
-try "alice: correct pw + BOB's OTP"        alice.admin "$MFA_TEST_USER_PW" "$("${OATH[@]}" "$B_SEC")" DENY
-try "alice: correct pw + wrong OTP"        alice.admin "$MFA_TEST_USER_PW" "000000"                          DENY
+try "alice: correct pw + BOB's OTP"        alice.admin "$MFA_PW_ALICE" "$("${OATH[@]}" "$B_SEC")" DENY
+try "alice: correct pw + wrong OTP"        alice.admin "$MFA_PW_ALICE" "000000"                          DENY
 try "alice: WRONG pw + her own OTP"        alice.admin "not-her-password" "$("${OATH[@]}" "$A_SEC")"  DENY
-try "alice: correct pw + NO OTP"           alice.admin "$MFA_TEST_USER_PW" ""                                DENY
+try "alice: correct pw + NO OTP"           alice.admin "$MFA_PW_ALICE" ""                                DENY
+try "alice: BOB'S password + her own OTP"  alice.admin "$MFA_PW_BOB"   "$("${OATH[@]}" "$A_SEC")" DENY
 try "unknown user"                         mallory     "whatever"         "123456"                          DENY
