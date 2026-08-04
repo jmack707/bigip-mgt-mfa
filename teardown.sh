@@ -22,6 +22,8 @@ set -a; . ./.env; set +a
 # shellcheck disable=SC1091
 . scripts/lib/directory.sh
 # shellcheck disable=SC1091
+. scripts/lib/units.sh
+# shellcheck disable=SC1091
 . bigip/lib/objects.sh
 
 DO_STACK=0; DO_BIGIP=0; VOLUMES=0
@@ -42,9 +44,8 @@ say(){ printf '\n\033[36m==> %s\033[0m\n' "$*"; }
 if [ "$DO_BIGIP" = 1 ]; then
   : "${BIGIP_PASS:?set BIGIP_PASS}"
   P=bigip-mgt-mfa; PART=Common
-  # BIGIP_B_MGMT is optional; tear down whatever is configured.
-  TD_UNITS=("${BIGIP_A_MGMT}")
-  [ -n "${BIGIP_B_MGMT:-}" ] && TD_UNITS+=("${BIGIP_B_MGMT}")
+  # BIGIP_B_MGMT is optional; restore local auth on whatever is configured.
+  TD_UNITS=(); while IFS= read -r u; do TD_UNITS+=("$u"); done < <(mfa_units)
   for unit in "${TD_UNITS[@]}"; do
     say "restoring local authentication on ${unit}"
     # First, so that a failure later cannot leave the unit pointed at a directory that is
@@ -62,7 +63,10 @@ if [ "$DO_BIGIP" = 1 ]; then
   while IFS= read -r o; do
     curl "${A[@]}" -o /dev/null -w "  DEL ${o##*~} -> %{http_code}\n" -X DELETE "$B/mgmt/tm/${o}"
   done < <(mfa_apm_objects "$P" "$PART")
-  # Then the supporting objects the build creates outside that list.
+  # Then the supporting objects the build creates outside that list. The B-side entries are
+  # deleted unconditionally: a single-unit deployment never created them (DELETE answers 404
+  # and the loop carries on), and a deployment that once had a peer must still lose them even
+  # if BIGIP_B_MGMT has since been cleared from .env.
   for o in \
     "ltm/virtual/~${PART}~${P}-shadow-a-vs" "ltm/virtual/~${PART}~${P}-shadow-b-vs" \
     "apm/resource/portal-access/~${PART}~${P}-bigip-a-tmui" \

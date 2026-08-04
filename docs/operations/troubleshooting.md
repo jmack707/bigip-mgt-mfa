@@ -79,9 +79,12 @@ unit.
 
 `auth ldap system-auth` and `auth source` are device-local: config-sync does **not** carry
 them to the peer. (`auth remote-role` *is* synced — but a role rule cannot authenticate
-anyone on a unit that has no LDAP server configured, so the symptom is the same.) Both units
-must be configured explicitly, which is why `deploy.sh --bigip` loops over `BIGIP_A_MGMT` and
-`BIGIP_B_MGMT`. Verify on each unit:
+anyone on a unit that has no LDAP server configured, so the symptom is the same.) Every unit
+must be configured explicitly, which is why `deploy.sh --bigip` loops over `BIGIP_A_MGMT` and,
+when it is set, `BIGIP_B_MGMT`. On a deployment you believe is a pair, check that first: an
+unset `BIGIP_B_MGMT` — or one still holding a quoted `"<bigip-b-mgmt-ip>"` sample, which
+counts as unset — means unit B was never touched by the deploy, and that produces exactly this
+symptom. Verify on each unit:
 
 ```bash
 tmsh list auth remote-role role-info bigip_mgt_mfa_admins
@@ -238,8 +241,34 @@ TMUI's `login.jsp` CSRF check; without it the form refuses the submission.
 ## iControl REST stops answering
 
 Symptoms range from `401` and `502 Proxy Error` to `/mgmt/tm/util/bash` reporting
-`Public URI path not registered`. `restjavad` wedges under a heavy run of REST calls and
-usually recovers on its own; `bigstart restart restjavad` clears it.
+`Public URI path not registered`, or the address simply not answering at all. `restjavad`
+wedges after a heavy run of REST calls and usually recovers on its own;
+`bigstart restart restjavad` clears it immediately.
+
+**The volume of calls is the trigger; the cause is memory.** Measured on an 8 GB VE running
+LTM + APM on TMOS 21.1, mid-demo:
+
+```bash
+free -m        # 7984 total, ~70 MB available
+free -m | tail -1   # Swap: 999 used of 999 — fully consumed
+grep -c OutOfMemory /var/log/restjavad*.log   # 0, on every file
+```
+
+No Java heap exhaustion anywhere — so raising the restjavad heap is not the fix, and
+`restjavad.useextramb` does not exist on 21.1 (`01020036:3 ... not found`). The box has no
+free memory and no swap left, so any burst of management-plane work pushes it into thrashing
+and restjavad stops answering. In order of effect:
+
+1. `bigstart restart restjavad restnoded` — reclaims the two `java` processes (~580 MB
+   resident between them) and clears the wedge now.
+2. **Give the guest more RAM.** 8 GB is the floor for LTM + APM, not a working figure.
+3. Only then consider `provision.extramb` (it defaults to `0`). Raising it while the box is
+   already at ~70 MB available takes memory it does not have and makes matters worse.
+
+Both scripts keep their `/mgmt/tm/util/bash` use to a minimum for the same reason: that
+endpoint forks a shell and loads `tmsh` on the appliance, so it is far more expensive than a
+plain `GET`. `validate.sh` reads the audit log **once per unit** rather than once per user,
+and `apm-build.sh` batches its `tmsh` commands.
 
 **This does not mean the demo is down.** The data plane is independent — TMM keeps serving
 the webtop perfectly while the management plane is unavailable. Check the VIP before
@@ -249,11 +278,21 @@ concluding otherwise:
 curl -sk -o /dev/null -w '%{http_code}\n' https://<MFA_APM_VIP>/
 ```
 
-`validate.sh` gates its configuration checks on a reachability probe for this reason — but
-that probe runs **once**, before the BIG-IP section. If `restjavad` is answering at that
-moment and wedges part-way through, the later checks still report as configuration failures.
-Known limitation, tracked as
-[issue #4](https://github.com/jmack707/bigip-mgt-mfa/issues/4).
+`validate.sh` gates its configuration checks on a reachability probe for this reason, and
+re-probes **before every per-unit block** rather than only once at the top
+([issue #4](https://github.com/jmack707/bigip-mgt-mfa/issues/4)). A unit that wedges
+part-way through a run is therefore reported as `SKIP` with the reason, not as a wall of
+configuration failures — and on a pair, one wedged unit no longer suppresses its healthy
+peer's results. Expect output like:
+
+```text
+  SKIP  10.1.1.5 role checks — REST stopped answering mid-run (not necessarily misconfigured)
+  PASS  10.1.1.6: alice.admin -> Administrator
+```
+
+Because `remote-role` and the access tier are config-synced, the peer's `PASS` lines are good
+evidence about what the wedged unit holds. They are not proof: `auth ldap system-auth` and
+`auth source` are device-local, so re-run once the unit answers again.
 
 If a run reports failures that make no sense, confirm with `f5.sh status` and with
 `scripts/test-mfa-matrix.sh`, which drives the data plane and is unaffected by the management

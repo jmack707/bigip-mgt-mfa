@@ -5,7 +5,7 @@ Every setting that governs bigip-mgt-mfa: the `.env` keys you edit, the values
 scripts honour but `.env.example` does not list. Site-specific values use the angle-bracket
 form, e.g. `<bigip-a-mgmt-ip>`.
 
-_Last validated: 2026-07._
+_Last validated: 2026-08._
 
 ## Overview
 `.env` is the only file you edit. Copy [`.env.example`](../../.env.example) to `.env` — the
@@ -139,14 +139,61 @@ it removes the browser hosts-file step entirely.
 | `BIGIP_USER` | `admin` | Account used for every iControl REST call |
 | `BIGIP_PASS` | _(required for the BIG-IP half)_ | That account's password |
 | `BIGIP_A_MGMT` | _(required)_ | Unit A's management address. The APM access tier is built here |
-| `BIGIP_B_MGMT` | _(required)_ | Unit B's management address. Receives system authentication and the remote-role rule only |
 | `BIGIP_A_TMUI` | _(required)_ | Unit A's **non-floating** internal self IP — the SSO target for its own TMUI |
-| `BIGIP_B_TMUI` | _(required)_ | Unit B's non-floating internal self IP |
+| `BIGIP_B_MGMT` | _(optional)_ | Unit B's management address. Receives system authentication and the remote-role rule only |
+| `BIGIP_B_TMUI` | _(optional)_ | Unit B's non-floating internal self IP. Required **only** when `BIGIP_B_MGMT` is set |
 
 `BIGIP_PASS` is plaintext in `.env` for the demo. In production, inject it from a secret
 manager instead: every script that touches a BIG-IP reads `BIGIP_PASS` from the environment
 before sourcing `.env` and restores the injected value afterwards, so an exported value wins
 over the file and the file can be left empty.
+
+### One BIG-IP or two
+A single unit is a complete deployment, not a degraded one. Most UDF blueprints and most home
+labs hand you exactly one BIG-IP, and nothing about MFA at the management edge needs a pair —
+the pair only makes the *failover* story demonstrable.
+
+`BIGIP_B_MGMT` is the single switch, and [`scripts/lib/units.sh`](../../scripts/lib/units.sh)
+is where every script asks about it. Leave it blank and the deployment has one webtop tile,
+one `system-auth` pass and no peer-sync assertion; set it — together with `BIGIP_B_TMUI` — and
+the second unit's façade virtual, `node` iRule, portal resource and tile are all built.
+
+Two details are worth knowing:
+
+- **A leftover sample value counts as blank.** A value still in the angle-bracket form used
+  elsewhere in `.env.example` — `"<bigip-b-mgmt-ip>"` — is not an address, and treating it as
+  one produces a webtop tile that hangs and a `system-auth` run against a name that does not
+  resolve, both of which read as BIG-IP faults rather than as an unfinished `.env`. Quote it
+  if you leave one there: `.env` is sourced by `bash`, so an **unquoted** `<…>` is parsed as a
+  redirect and the whole file fails with `syntax error near unexpected token 'newline'` before
+  any of this is consulted. That is why the second unit's keys ship empty rather than sampled.
+- **Setting `BIGIP_B_MGMT` without `BIGIP_B_TMUI` is refused** before any call is made. The
+  alternative is a published tile with nothing behind it, which fails silently at click time.
+
+The switch converges both ways: clearing `BIGIP_B_MGMT` from an existing pair deployment and
+re-running `./deploy.sh --bigip` deletes B's portal resource, façade virtual server and `node`
+iRule as well as rebuilding the tile list without it.
+
+### Two units, no HA
+Declaring a second unit does **not** require the two to be in a sync-failover device group.
+Nothing in the login chain depends on the HA relationship:
+
+- The access tier is built on unit A only, so it is where it needs to be either way.
+- B's webtop tile reaches B by routing to `BIGIP_B_TMUI` from A, which is ordinary IP
+  reachability rather than anything HA provides.
+- B's authorization is written **directly** by `bigip/system-auth.sh` — `auth ldap
+  system-auth`, `auth source`, the `guest` default and every `remote-role` rule — on each
+  configured unit. `auth remote-role` also happens to config-sync, but nothing here relies on
+  that.
+
+What you do not get is failover: the VIP lives on A, so A going away takes the demo with it.
+`MFA_APM_TRAFFIC_GROUP` is still pinned and still succeeds — `traffic-group-1` exists on a
+standalone unit — it simply has nothing to float to.
+
+Both the deploy and the validator discover the device group rather than inferring it from
+`.env`. With no sync-failover group, `deploy.sh` reports there is nothing to sync and
+`scripts/validate.sh` reports the peer-sync assertion as a `SKIP` rather than failing for an
+access profile that is correctly absent from B.
 
 The two `_TMUI` addresses must be the units' *non-floating* self IPs. A floating address
 follows the active unit, so publishing it would give both webtop tiles the same destination
@@ -165,7 +212,7 @@ around each call to `bigip/system-auth.sh`, and it defaults to `BIGIP_A_MGMT` in
 | `MFA_APM_VIP` | _(required)_ | Address of the webtop virtual server. Browsers reach the demo at `https://<vip>/` |
 | `MFA_APM_TRAFFIC_GROUP` | `traffic-group-1` | Intended traffic group for the floating VIP |
 | `MFA_SHADOW_A` | `192.0.2.5` | RFC 5737 TEST-NET façade in front of unit A's TMUI |
-| `MFA_SHADOW_B` | `192.0.2.6` | Façade in front of unit B's TMUI |
+| `MFA_SHADOW_B` | `192.0.2.6` | Façade in front of unit B's TMUI. Unused unless `BIGIP_B_MGMT` is set |
 
 `MFA_WEBTOP_FQDN` appears in three places that must agree: the SAN on the VIP certificate,
 browser that reaches the VIP by address still completes the redirect.
@@ -211,9 +258,13 @@ several sync-failover groups and the first one returned is not the one you want.
 The sync is what carries the APM access tier from A to B, along with `auth remote-role`.
 It is not what carries system authentication: `auth ldap system-auth` and `auth source` live
 in the device-local configuration and are never synced, which is why `deploy.sh` runs
-`bigip/system-auth.sh` against both units. Skipping unit B leaves a unit that still
+`bigip/system-auth.sh` against every configured unit. Skipping unit B leaves a unit that still
 authenticates locally, so the synced role rule has nothing to act on and the demo works only
 until the first failover.
+
+On a single-unit deployment there is nothing to sync, but the device group is still queried
+rather than assumed: the group is the authority on whether the unit has a peer, `.env` is not.
+A genuinely standalone unit answers with no group and the step reports that.
 
 ## Derived and undocumented overrides
 These are read by the scripts but do not appear in `.env.example`. Most are derived and need
@@ -251,6 +302,9 @@ output of [cli.md](cli.md)'s validator.
 | DNS resolver | `bigip-mgt-mfa-resolver` |
 | Shadow façades | `bigip-mgt-mfa-shadow-a-vs` / `-b-vs`, with iRules `bigip-mgt-mfa-shadow-a-node` / `-b-node` |
 | Portal Access resources | `bigip-mgt-mfa-bigip-a-tmui`, `bigip-mgt-mfa-bigip-b-tmui` |
+
+The `-b-` objects exist only when `BIGIP_B_MGMT` is set. On a single-unit deployment they are
+never created, and an earlier pair deployment's copies are deleted on the next build.
 | Webtop and form SSO | `bigip-mgt-mfa-webtop`, `bigip-mgt-mfa-tmui-sso` |
 | Remote-role rule | `bigip_mgt_mfa_admins` |
 

@@ -88,9 +88,14 @@ to pair one user's password with another user's token.
   regardless. Each unit's TMUI is fronted by an RFC 5737 façade address instead, steered to
   the real last hop by an iRule.
 - **Some BIG-IP configuration is device-local.** `auth ldap system-auth` and `auth source`
-  are not carried by config-sync, so both units are configured explicitly. `auth remote-role`
-  *is* synced, but a role rule is inert on a unit that has no directory configured and is
-  still authenticating locally.
+  are not carried by config-sync, so every configured unit is set up explicitly.
+  `auth remote-role` *is* synced, but a role rule is inert on a unit that has no directory
+  configured and is still authenticating locally.
+- **The second BIG-IP is optional.** One unit is a complete deployment; the pair exists to
+  make the failover story demonstrable, not to make the design work. Everything per-unit —
+  the `system-auth` pass, the façade virtual, the portal resource and its webtop tile, and
+  the validator's expected counts — iterates what `.env` declares, so the single-unit path is
+  the same code path with one address fewer.
 
 ## Decisions
 - [adr/0001-apm-collects-the-password.md](adr/0001-apm-collects-the-password.md) — APM collects the password itself, which is why no vault is needed

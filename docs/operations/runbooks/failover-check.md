@@ -22,6 +22,10 @@ units, and probes both users' roles against both units. That is the cheap versio
 be green first. This runbook is the expensive version: it proves the *data plane* moves too.
 
 ## Prerequisites
+- **Two BIG-IPs.** The second unit is optional in this deployment — with `BIGIP_B_MGMT` unset
+  there is one unit, one webtop tile and no sync, and nothing here applies because there is no
+  failover to force. Skip this runbook in that case; `scripts/validate.sh` still asserts the
+  single unit end to end.
 - Both units reachable on `443` from the Docker host, `BIGIP_PASS` available, and the stack up.
 - The pair genuinely in HA: a sync-failover device group, `In Sync`, both units `Active` or
   `Standby` rather than `Offline` or `Forced Offline`.

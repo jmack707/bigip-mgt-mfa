@@ -1,6 +1,6 @@
 # Deploy
 
-_Last validated: 2026-07_
+_Last validated: 2026-08_
 
 The BIG-IP half: trust anchors, per-unit system authentication, the access policy, the TOTP
 seeds, and a config-sync to the peer. The Docker half is [install.md](install.md) and should
@@ -23,11 +23,18 @@ Three things happen, and they are not equivalent:
   ([adr/0003-authorization-on-remote-role.md](adr/0003-authorization-on-remote-role.md)).
 - **`bigip/apm-build.sh`, on unit A only.** The access tier: the VIP certificate, the AAA
   LDAP server, the TOTP seed data group and verification iRule, the logon page, the policy
-  graph, the webtop, the façade virtuals and one portal resource per unit.
+  graph, the webtop, the façade virtuals and one portal resource per **configured** unit.
 - **A config-sync**, which carries the access tier to the peer.
 
-`BIGIP_B_MGMT` is optional. Leave it unset for a single BIG-IP and everything runs once; the
-sync step reports that there is nothing to sync.
+`BIGIP_B_MGMT` is optional, and a single BIG-IP is a complete deployment rather than a
+degraded one. Leave it unset and everything runs once: one `system-auth` pass, **one webtop
+tile**, and a sync step that reports there is nothing to sync. Set it to add a second unit —
+in which case `BIGIP_B_TMUI` must be set too. The build refuses a half-declared peer up front
+rather than publishing a tile with nothing behind it.
+
+Clearing `BIGIP_B_MGMT` from a deployment that had a pair converges the other way: the next
+`./deploy.sh --bigip` deletes B's portal resource, façade virtual server and `node` iRule, and
+rebuilds the tile list without it.
 
 ## Prerequisites
 
