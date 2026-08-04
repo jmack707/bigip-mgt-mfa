@@ -23,8 +23,9 @@ down until both halves of `deploy.sh` have run and the anchors are back.
 ## Prerequisites
 - Shell access on the Docker host, in the repo root, with a complete `.env` and the stack
   currently running.
-- `BIGIP_PASS` readable from `.env` or injected in the environment, and REST reachability to
-  both management addresses on `443` — the new anchor has to reach both units, not just A.
+- `BIGIP_PASS` readable from `.env` or injected in the environment, and REST reachability on
+  `443` to every configured management address. On a pair the new anchor has to reach both
+  units, not just A; `BIGIP_B_MGMT` is optional, and unset there is only unit A to reach.
 - Administrative access to whatever trusts the CA today: the browsers and OS trust stores used
   to demo the webtop.
 - Ownership of `certs/`. The `osixia/openldap` container chowns the bind-mounted directory at
@@ -92,19 +93,22 @@ presents is issued by the new CA with fresh dates; `validate.sh` exits `0`; and 
 completes the whole chain, which is what proves the BIG-IP re-anchored rather than merely
 accepting a cached session.
 
-Confirm the anchor landed on **both** units — this is the step people skip, and its absence only
-shows up at the next failover:
+Confirm the anchor landed on **every** unit — on a pair this is the step people skip, and its
+absence only shows up at the next failover. `mfa_units` lists whatever `.env` declares, so this
+is one unit or two without editing the loop:
 
 ```bash
-for u in "${BIGIP_A_MGMT}" "${BIGIP_B_MGMT}"; do
+set -a; . ./.env; set +a
+. scripts/lib/units.sh
+while IFS= read -r u; do
   printf '%s ' "$u"
   curl -sk -u "${BIGIP_USER}:${BIGIP_PASS}" \
     "https://${u}/mgmt/tm/sys/file/ssl-cert/${MFA_LDAP_CA_NAME:-bigip-mgt-mfa-ca.crt}" \
     | jq -r '.checksum // "missing"'
-done
+done < <(mfa_units)
 ```
 
-Expected: the same non-empty checksum from both units.
+Expected: the same non-empty checksum from every unit listed.
 
 ## Rollback
 Restore the backup taken in step 1 and re-run both halves without `MFA_REGEN_CA`, which reuses

@@ -20,6 +20,8 @@ set -a; . ./.env; set +a
 [ -n "$_PASS_IN" ] && BIGIP_PASS="$_PASS_IN"     # an injected secret beats the file
 # shellcheck disable=SC1091
 . scripts/lib/directory.sh
+# shellcheck disable=SC1091
+. scripts/lib/units.sh
 
 DO_STACK=0; DO_BIGIP=0
 case "${1:-all}" in
@@ -108,9 +110,10 @@ if [ "$DO_BIGIP" = 1 ]; then
 
   # BIGIP_B_MGMT is OPTIONAL. An HA pair is the interesting demo, but most UDF blueprints and
   # many personal labs give you a single BIG-IP, and there is nothing about MFA at the
-  # management edge that needs two. Leave it unset and everything below simply runs once.
-  UNITS=("$BIGIP_A_MGMT")
-  [ -n "${BIGIP_B_MGMT:-}" ] && UNITS+=("$BIGIP_B_MGMT")
+  # management edge that needs two. Leave it unset and everything below simply runs once —
+  # one webtop tile, one system-auth pass, no sync. See scripts/lib/units.sh.
+  mfa_require_peer_tmui || exit 1
+  UNITS=(); while IFS= read -r u; do UNITS+=("$u"); done < <(mfa_units)
 
   if [ "${#UNITS[@]}" -eq 1 ]; then
     say "system auth + remote-role (single unit — BIGIP_B_MGMT not set)"
@@ -128,7 +131,14 @@ if [ "$DO_BIGIP" = 1 ]; then
   say "APM access policy on unit A ($BIGIP_A_MGMT)"
   BIGIP_MGMT="$BIGIP_A_MGMT" bigip/apm-build.sh
 
-  say "config-sync to the peer"
+  if mfa_have_peer; then
+    say "config-sync to the peer"
+  else
+    # Still asked for, even with no peer declared: the device group is the authority on
+    # whether this unit has one, not .env. A unit that really is standalone answers with no
+    # group and the step reports that instead of failing.
+    say "config-sync (single unit — checking for a device group anyway)"
+  fi
   # Resolve the device group here rather than inside a remote shell: the name has to be
   # substituted as a literal, and nesting quotes through /util/bash is how you end up asking
   # TMOS to sync to a group called "{".

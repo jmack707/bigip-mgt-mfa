@@ -6,6 +6,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 _PASS_IN="${BIGIP_PASS:-}"; set -a; . "${HERE}/../.env"; set +a
 # shellcheck disable=SC1091
 . "${HERE}/lib/directory.sh"
+# shellcheck disable=SC1091
+. "${HERE}/lib/units.sh"
 
 # demo_pw <user> — the per-user demo password, falling back to the shared one so an older
 # .env that only sets MFA_TEST_USER_PW still works.
@@ -75,25 +77,39 @@ MEM=$(ldapsearch -x -LLL -H "$LDAP_URI" -D "${MFA_BIND_DN}" -w "${MFA_BIND_PW}" 
 # Note the data plane is independent: TMM keeps serving the webtop perfectly while restjavad
 # is down, so "REST unreachable" is not the same as "the demo is down". Check the VIP.
 #
-# KNOWN LIMITATION (issue #4): this probes ONCE. If restjavad is answering here and wedges
-# part-way through the run -- which it does, under exactly the volume of REST calls a full
-# validation makes -- every later check still reports as a configuration failure, which is
-# the confusion this gate exists to prevent. If results look wrong, confirm with
-# `f5.sh status` and scripts/test-mfa-matrix.sh, which goes through the data plane and is
-# unaffected. The fix is to re-probe per section rather than once at the top.
+# This gate probes once up front AND every per-unit block re-probes before it asserts
+# (issue #4). Probing only at the top was not enough: restjavad recovers and wedges again
+# within a single run, so a unit that answered here can be gone three checks later and every
+# later check then reported as a configuration failure -- the exact confusion this gate
+# exists to prevent. Observed on 2026-08-04: alice passed on unit A and the next three users
+# reported 'unknown' on the same unit while all four passed on its peer.
+#
+# The underlying cause is memory, not request volume: an 8 GB VE running LTM+APM sits at
+# ~70 MB available with swap fully consumed, so a burst of REST tips it into thrashing.
+# There is no Java OOM in restjavad's logs. Recover with 'bigstart restart restjavad' and
+# see docs/operations/troubleshooting.md; validating from a box with headroom is the fix.
 A=(-sk -u "${BIGIP_USER}:${BIGIP_PASS:-}")
 # BIGIP_B_MGMT is optional -- a single-unit deployment is supported, so every per-unit check
-# iterates whatever is actually configured rather than assuming a pair.
-UNITS=("$BIGIP_A_MGMT")
-[ -n "${BIGIP_B_MGMT:-}" ] && UNITS+=("$BIGIP_B_MGMT")
+# iterates whatever is actually configured rather than assuming a pair. Asserting a pair on a
+# single-unit deployment would report FAILs for objects that are correctly absent, which is
+# worse than useless: it trains you to ignore the validator.
+UNITS=(); while IFS= read -r u; do UNITS+=("$u"); done < <(mfa_units)
 mgmt_up(){ # mgmt_up <address>
   curl "${A[@]}" -o /dev/null -m8 -w '%{http_code}' "https://$1/mgmt/tm/sys/version" 2>/dev/null | grep -q '^200$'
 }
+# Degrade PER UNIT. One wedged unit used to skip every BIG-IP check including the healthy
+# peer's, which throws away most of the answer for no reason -- on a pair, the peer's config
+# is the best evidence you have about what the wedged unit holds, because remote-role and the
+# access tier are config-synced. Only a total blackout skips the section wholesale.
 REST_DOWN=0
 if [ -n "${BIGIP_PASS:-}" ]; then
+  UP=0
   for u in "${UNITS[@]}"; do
-    mgmt_up "$u" || { REST_DOWN=1; printf '  \033[33mSKIP\033[0m  %s iControl REST is not answering\n' "$u"; }
+    if mgmt_up "$u"; then UP=$((UP+1)); else
+      printf '  \033[33mSKIP\033[0m  %s iControl REST is not answering\n' "$u"
+    fi
   done
+  [ "$UP" -eq 0 ] && REST_DOWN=1
 fi
 if [ "$REST_DOWN" = 1 ]; then
   sect "BIG-IP access tier"
@@ -109,6 +125,11 @@ if [ -z "${BIGIP_PASS:-}" ]; then
 else
   A=(-sk -u "${BIGIP_USER}:${BIGIP_PASS}")
   for unit in "${UNITS[@]}"; do
+    # Re-probe per unit, not just at the top of the run: see the note above.
+    if ! mgmt_up "$unit"; then
+      skip "$unit config checks — REST stopped answering mid-run (not necessarily misconfigured)"
+      continue
+    fi
     RR=$(curl "${A[@]}" -m8 "https://${unit}/mgmt/tm/auth/remote-role/role-info/bigip_mgt_mfa_admins" | jq -r '.attribute // empty')
     [ "$RR" = "${MFA_ADMIN_ROLE_ATTRIBUTE}" ] \
       && ok "$unit remote-role maps ${RR} -> administrator" \
@@ -118,22 +139,47 @@ else
     DEF=$(curl "${A[@]}" -m8 "https://${unit}/mgmt/tm/auth/remote-user" | jq -r '.defaultRole // empty')
     [ "$DEF" = guest ] && ok "$unit default role is guest (read-only)" || bad "$unit default role is '${DEF:-unknown}'"
   done
+  # Everything from here is unit-A-specific: the access tier is built there. If A alone is
+  # wedged the peer's checks above still ran, and these are skipped rather than failed.
+  if ! mgmt_up "$BIGIP_A_MGMT"; then
+    skip "access tier objects on A — REST not answering on ${BIGIP_A_MGMT} (the peer's checks above still hold)"
+  else
   AP=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/profile/access/~Common~bigip-mgt-mfa" | jq -r '.name // empty')
   [ -n "$AP" ] && ok "access profile bigip-mgt-mfa present on A" || bad "access profile missing on A"
-  # Synced, not just built: the peer must carry the policy or a failover loses the webtop.
-  if [ -n "${BIGIP_B_MGMT:-}" ]; then
-    APB=$(curl "${A[@]}" -m8 "https://${BIGIP_B_MGMT}/mgmt/tm/apm/profile/access/~Common~bigip-mgt-mfa" | jq -r '.name // empty')
-    [ -n "$APB" ] && ok "access profile synced to B" || bad "access profile NOT on B — run a config-sync"
+  # Synced, not just built: on an HA pair the peer must carry the policy or a failover loses
+  # the webtop.
+  #
+  # Gated on the DEVICE GROUP, not on BIGIP_B_MGMT. Two BIG-IPs that are not in a
+  # sync-failover group are a perfectly good deployment -- the access tier only ever exists on
+  # A, B's webtop tile is reached by routing to its self IP, and B's authorization is written
+  # directly by system-auth.sh rather than synced -- so the profile is correctly absent there
+  # and "run a config-sync" would be advice with nothing to sync to. The same discovery as
+  # deploy.sh, so the two agree about what this deployment is.
+  if mfa_have_peer; then
+    DG="${MFA_DEVICE_GROUP:-}"
+    [ -z "$DG" ] && DG=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/cm/device-group" 2>/dev/null \
+        | jq -r '[.items[]? | select(.type=="sync-failover") | .name] | first // empty')
+    if [ -n "$DG" ]; then
+      APB=$(curl "${A[@]}" -m8 "https://${BIGIP_B_MGMT}/mgmt/tm/apm/profile/access/~Common~bigip-mgt-mfa" | jq -r '.name // empty')
+      [ -n "$APB" ] && ok "access profile synced to B (device group ${DG})" || bad "access profile NOT on B — run a config-sync"
+    else
+      skip "peer sync — no sync-failover device group; the access tier lives on A only"
+    fi
   else
     skip "peer sync — single-unit deployment (BIGIP_B_MGMT unset)"
   fi
+  # One portal resource per CONFIGURED unit. On a single-unit deployment the B resource is
+  # not merely unpublished, it is not created at all -- and apm-build.sh deletes a leftover
+  # one -- so the expected count follows .env rather than being fixed at two.
+  WANT_RES=$(mfa_unit_count)
   RES_N=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/apm/resource/portal-access" | jq -r '[.items[]?|select(.name|startswith("bigip-mgt-mfa-bigip"))]|length')
-  [ "${RES_N:-0}" = 2 ] && ok "two portal resources (one per unit)" || bad "expected 2 portal resources, found ${RES_N:-0}"
+  [ "${RES_N:-0}" = "$WANT_RES" ] && ok "${RES_N} portal resource(s) — one per configured unit" || bad "expected $WANT_RES portal resource(s), found ${RES_N:-0}"
   # A portal resource can exist, publish and rewrite perfectly while carrying NO SSO
   # configuration: passing sso inside items.item1 on a REST create returns 200 and is then
   # silently dropped. The user gets a working webtop that immediately asks them to log in
   # again -- the one thing this demo exists to avoid -- so assert it rather than assume it.
-  for r in bigip-a bigip-b; do
+  PORTAL_IDS=(bigip-a); mfa_have_peer && PORTAL_IDS+=(bigip-b)
+  for r in "${PORTAL_IDS[@]}"; do
     # The /items SUB-COLLECTION, not the parent object: the parent's representation omits
     # nested item fields entirely and reports sso as null even when it is correctly set.
     # Reading the parent produces a convincing false alarm.
@@ -142,6 +188,7 @@ else
   done
   VS=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/ltm/virtual/~Common~bigip-mgt-mfa-vs" | jq -r '.destination // empty')
   [ -n "$VS" ] && ok "webtop virtual server $VS" || bad "webtop virtual server missing"
+  fi   # end of the unit-A-specific block
 fi
 
 sect "authorization (the point of the demo)"
@@ -152,23 +199,46 @@ else
   # role legitimately cannot use iControl REST, so a read-only user returns 401 to curl and
   # a status-code test would read that as "broken" when it is exactly right. The audit line
   # records the role TMOS actually assigned.
-  probe_role(){ # probe_role <unit> <user> <password>
-    curl -sk -m10 -o /dev/null -u "${2}:${3}" "https://${1}/mgmt/tm/sys/version" 2>/dev/null
-    sleep 3
-    curl -sk -m10 -u "${BIGIP_USER}:${BIGIP_PASS}" -X POST -H 'Content-Type: application/json' \
+  # ONE /util/bash per unit, not one per user. That endpoint forks a shell and loads tmsh on
+  # the appliance -- it is by far the most expensive call this script makes, and four users
+  # used to cost four of them on every unit. The logins themselves are cheap GETs, so fire
+  # all four, wait ONCE for the audit lines to land, then read the log a single time and pick
+  # each user's most recent line locally. Eight heavy calls become two on a pair, and three
+  # of the four sleeps disappear with them.
+  audit_tail(){ # audit_tail <unit> — recent pam_audit lines, in one call
+    curl -sk -m20 -u "${BIGIP_USER}:${BIGIP_PASS}" -X POST -H 'Content-Type: application/json' \
       "https://${1}/mgmt/tm/util/bash" \
-      -d "{\"command\":\"run\",\"utilCmdArgs\":\"-c \\\"grep pam_audit /var/log/secure | grep ${2} | tail -1\\\"\"}" \
-      | jq -r '.commandResult // ""' | grep -oE 'level=[A-Za-z]+' | tail -1 | cut -d= -f2
+      -d '{"command":"run","utilCmdArgs":"-c \"grep pam_audit /var/log/secure | tail -80\""}' \
+      | jq -r '.commandResult // ""'
+  }
+  role_from(){ # role_from <log-text> <user> — the role TMOS last assigned that user
+    grep -F "$2" <<<"$1" | grep -oE 'level=[A-Za-z]+' | tail -1 | cut -d= -f2
   }
   # Four principals, four roles, each with their OWN password -- so this also proves the
   # directory is distinguishing people rather than accepting one shared credential.
+  ROLE_SPECS=("alice.admin:${MFA_PW_ALICE}:Administrator"
+              "carol.netops:${MFA_PW_CAROL}:Operator"
+              "dave.audit:${MFA_PW_DAVE}:Auditor"
+              "bob.user:${MFA_PW_BOB}:Guest")
   for unit in "${UNITS[@]}"; do
-    for spec in "alice.admin:${MFA_PW_ALICE}:Administrator" \
-                "carol.netops:${MFA_PW_CAROL}:Operator" \
-                "dave.audit:${MFA_PW_DAVE}:Auditor" \
-                "bob.user:${MFA_PW_BOB}:Guest"; do
-      u="${spec%%:*}"; rest="${spec#*:}"; pw="${rest%%:*}"; want="${rest##*:}"
-      R=$(probe_role "$unit" "$u" "$pw")
+    if ! mgmt_up "$unit"; then
+      skip "$unit role checks — REST stopped answering mid-run (not necessarily misconfigured)"
+      continue
+    fi
+    for spec in "${ROLE_SPECS[@]}"; do
+      u="${spec%%:*}"; rest="${spec#*:}"; pw="${rest%%:*}"
+      curl -sk -m10 -o /dev/null -u "${u}:${pw}" "https://${unit}/mgmt/tm/sys/version" 2>/dev/null
+    done
+    sleep 4                       # one wait for all four lines, not one per user
+    AUDIT=$(audit_tail "$unit")
+    if [ -z "$AUDIT" ]; then
+      # An empty read is the control plane going away, not four simultaneous role failures.
+      skip "$unit role checks — the audit log could not be read (REST wedged mid-run)"
+      continue
+    fi
+    for spec in "${ROLE_SPECS[@]}"; do
+      u="${spec%%:*}"; want="${spec##*:}"
+      R=$(role_from "$AUDIT" "$u")
       [ "$R" = "$want" ] && ok "$unit: $u -> $want" \
         || bad "$unit: $u got '${R:-unknown}', expected $want (is checkRolesGroup enabled?)"
     done

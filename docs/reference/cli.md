@@ -4,7 +4,7 @@ Every runnable script in the repo, what it needs, and how it exits. All of them 
 `.env` from the repo root themselves, so each can be run on its own as well as through
 `deploy.sh`.
 
-_Last validated: 2026-07._
+_Last validated: 2026-08._
 
 ## Overview
 Two commands do everything, and the rest are the individual steps they call — useful on
@@ -52,8 +52,10 @@ before pointing anything at your appliances.
 pointer to `.env.example` if it does not. `openssl`, `jq`, `envsubst`, `curl` and the Docker
 Compose **V2** plugin must be on `PATH` — the standalone v1 `docker-compose` binary is
 rejected explicitly, because the invocation is `docker compose`. The `--bigip` half
-additionally asserts `BIGIP_PASS`, `BIGIP_A_MGMT` and `BIGIP_B_MGMT` are set before it makes
-a single call.
+additionally asserts `BIGIP_PASS` and `BIGIP_A_MGMT` are set before it makes a single call.
+`BIGIP_B_MGMT` is **optional** — leave it blank for a single BIG-IP. Setting it makes
+`BIGIP_B_TMUI` required, and the run stops with that message rather than publishing a webtop
+tile with nothing behind it.
 
 **What `--stack` does.** Prints the resolved directory model; mints certificates; renders
 Compose profile when `MFA_DIRECTORY_MODE=bundled`; in bundled mode applies the `memberof` and
@@ -62,10 +64,11 @@ polls the realm's OpenID discovery document for up to five minutes, printing the
 found. The overlay must land before the group is created — `memberOf` is only computed for
 changes made after the overlay is active, so the reverse order silently yields no admins.
 
-**What `--bigip` does.** Runs `bigip/system-auth.sh` against unit A and unit B in turn, then
-`bigip/apm-build.sh` against unit A only, then triggers a config-sync to the device group
-(discovered when `MFA_DEVICE_GROUP` is empty; skipped with a message when the unit is
-standalone).
+**What `--bigip` does.** Runs `bigip/system-auth.sh` against each configured unit in turn —
+A alone, or A then B — then `bigip/apm-build.sh` against unit A only, then triggers a
+config-sync to the device group (discovered when `MFA_DEVICE_GROUP` is empty; skipped with a
+message when the unit is standalone). The APM build publishes one webtop tile per configured
+unit, so a single-unit deployment is the same run with one address fewer.
 
 **Exit behaviour.** `set -euo pipefail`, so the first failing command stops the run. Missing
 never publishes its realm all exit `1` with a one-line reason on stderr. Bad usage exits `2`.
@@ -182,14 +185,35 @@ BIGIP_PASS='<bigip-admin-pw>' scripts/validate.sh   # injected rather than from 
 
 Takes no arguments. Seven sections: containers running; the two demo DNS records answering
 from CoreDNS; the directory (bind account, both demo users, and that `alice.admin` is in the
-access tier on both units; the resulting role for each demo user; and the VIP answering on
-`https://${MFA_WEBTOP_FQDN}/`.
+access tier on every configured unit; the resulting role for each demo user; and the VIP
+answering on `https://${MFA_WEBTOP_FQDN}/`.
+
+Every per-unit assertion follows `.env`: with `BIGIP_B_MGMT` unset it expects **one** portal
+resource rather than two, checks SSO on unit A's resource only, and reports the peer-sync
+assertion as a `SKIP`. It never fails a single-unit deployment for objects that are correctly
+absent.
+
+The peer-sync assertion is gated on the **device group** rather than on `BIGIP_B_MGMT`, so two
+BIG-IPs that are not in a sync-failover group also `SKIP` it. That configuration works — the
+access tier only ever exists on A, and B's authorization is written directly rather than
+synced — so the access profile is correctly absent from B and there is nothing to sync to.
+
+Each unit's reachability is re-probed before its own checks, so a unit whose `restjavad`
+wedges mid-run is reported as `SKIP` with the reason rather than as failed configuration, and
+a wedged unit no longer suppresses a healthy peer's results.
 
 The role check is asserted from each BIG-IP's own `/var/log/secure` audit line rather than
 from an HTTP status code. F5's Guest role is denied iControl REST outright, so a correctly
 read-only user answers `401` to `curl` — a status-code test would read the demo working as
 the demo broken. The `pam_audit` line records the role TMOS actually assigned, which is the
 question being asked.
+
+All four logins are fired first and the audit log is then read **once per unit**, rather than
+once per user. `/mgmt/tm/util/bash` forks a shell and loads `tmsh` on the appliance, making it
+the most expensive call either script issues; batching takes a pair from eight of them to two
+and removes three of the four waits. See
+[troubleshooting.md](../operations/troubleshooting.md#icontrol-rest-stops-answering) for why
+that matters on a memory-constrained VE.
 
 **Environment.** `.env`; `docker`, `dig`, `ldapwhoami`, `ldapsearch`, `curl` and `jq` on
 `PATH`. `BIGIP_PASS` may be injected. If it is empty the BIG-IP and role sections are
@@ -201,18 +225,19 @@ checks** — `0` means everything passed, `3` means three assertions failed. Do 
 for `1`.
 
 ## `bigip/system-auth.sh`
-Per-unit remote authentication and authorization. **Run against each unit of the pair.**
+Per-unit remote authentication and authorization. **Run against every unit you have.**
 
 ```bash
 BIGIP_MGMT=<bigip-a-mgmt-ip> bigip/system-auth.sh
-BIGIP_MGMT=<bigip-b-mgmt-ip> bigip/system-auth.sh
+BIGIP_MGMT=<bigip-b-mgmt-ip> bigip/system-auth.sh   # only if you have a second unit
 ```
 
 Takes no arguments; the unit is selected by `BIGIP_MGMT`, which the script requires and does
-not default. `deploy.sh --bigip` sets it per unit and calls this twice. Running it against
-only one unit is the classic "works until failover" bug: `auth ldap system-auth` and `auth
-source` live in the device-local configuration and a config-sync does not carry them.
-(`auth remote-role` does sync, but it cannot authenticate anyone on its own.)
+not default. `deploy.sh --bigip` sets it per configured unit and calls this once or twice
+accordingly. On a pair, running it against only one unit is the classic "works until failover"
+bug: `auth ldap system-auth` and `auth source` live in the device-local configuration and a
+config-sync does not carry them. (`auth remote-role` does sync, but it cannot authenticate
+anyone on its own.)
 
 Five steps: upload the directory CA and create-or-**update** the `ssl-cert` object (an
 existing object still holds the old CA, and stale trust fails closed); write the LDAPS

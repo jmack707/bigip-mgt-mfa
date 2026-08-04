@@ -28,10 +28,15 @@ _PASS_IN="${BIGIP_PASS:-}"; set -a; . "${HERE}/../.env"; set +a
 # shellcheck disable=SC1091
 . "${HERE}/../scripts/lib/directory.sh"
 # shellcheck disable=SC1091
+. "${HERE}/../scripts/lib/units.sh"
+# shellcheck disable=SC1091
 . "${HERE}/lib/objects.sh"
 [ -n "$_PASS_IN" ] && BIGIP_PASS="$_PASS_IN"
 : "${BIGIP_PASS:?export BIGIP_PASS}"; : "${MFA_BIND_PW:?need MFA_BIND_PW}"
 : "${BIGIP_MGMT:=${BIGIP_A_MGMT:?set BIGIP_A_MGMT}}"
+# A second unit is optional throughout. Everything B-side below — the façade virtual, its
+# node iRule, the portal resource and the webtop tile — is built only when one is configured.
+mfa_require_peer_tmui || exit 1
 
 B="https://${BIGIP_MGMT}"; A=(-sk -u "${BIGIP_USER}:${BIGIP_PASS}")
 P=bigip-mgt-mfa                     # object-name prefix / access-profile name
@@ -219,7 +224,7 @@ add "$B/mgmt/tm/apm/policy/agent/variable-assign" "$(jq -n --arg n "${P}_act_sso
 add "$B/mgmt/tm/apm/policy/agent/ending-allow" "$(jq -n --arg n "${P}_end_allow_ag" '{name:$n,partition:"Common"}')"
 add "$B/mgmt/tm/apm/policy/agent/ending-deny" "$(jq -n --arg n "${P}_end_deny_ag" --arg cg "/$PART/${P}_end_deny_ag" '{name:$n,partition:"Common",customizationGroup:$cg}')"
 
-step "8. shadow façades for the two TMUIs"
+step "8. shadow façades for the TMUI of each configured unit ($(mfa_unit_count))"
 # APM portal access refuses "reserved" targets — self-IPs, the management address, cluster
 # addresses — with 01490585/errorcode=17, and publishing TMUI on a routable external self-IP
 # would be a hole anyway. So each unit's TMUI is fronted by a non-routable RFC5737 façade,
@@ -229,16 +234,31 @@ bash_cmd "tmsh modify sys db tmm.tcl.rule.connect.allow_loopback_addresses value
 add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-shadow-a-node" --arg b "when CLIENT_ACCEPTED {
     node ${BIGIP_A_TMUI} 443
 }" '{name:$n,partition:"Common",apiAnonymous:$b}')"
-add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-shadow-b-node" --arg b "when CLIENT_ACCEPTED {
-    node ${BIGIP_B_TMUI} 443
-}" '{name:$n,partition:"Common",apiAnonymous:$b}')"
 mk_shadow_vs(){ # mk_shadow_vs <name> <facade-ip> <irule>
   add "$B/mgmt/tm/ltm/virtual" "$(jq -n --arg n "$1" --arg d "/$PART/$2:443" --arg ir "/$PART/$3" \
     '{name:$n,partition:"Common",destination:$d,mask:"255.255.255.255",ipProtocol:"tcp",
       profiles:[{name:"/Common/tcp"}],rules:[$ir],sourceAddressTranslation:{type:"automap"}}')"
 }
 mk_shadow_vs "${P}-shadow-a-vs" "$SHADOW_A" "${P}-shadow-a-node"
-mk_shadow_vs "${P}-shadow-b-vs" "$SHADOW_B" "${P}-shadow-b-node"
+if mfa_have_peer; then
+  add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-shadow-b-node" --arg b "when CLIENT_ACCEPTED {
+    node ${BIGIP_B_TMUI} 443
+}" '{name:$n,partition:"Common",apiAnonymous:$b}')"
+  mk_shadow_vs "${P}-shadow-b-vs" "$SHADOW_B" "${P}-shadow-b-node"
+else
+  # Converge in BOTH directions. Dropping BIGIP_B_MGMT from .env must actually remove the
+  # second unit, not merely stop publishing its tile: the façade virtual and its node iRule
+  # are created outside the step-2 teardown list, so nothing else would ever delete them and
+  # a stale VS would keep listening on 192.0.2.6 pointing at a unit that is no longer part of
+  # the deployment. The portal resource goes here too — its only referrer, the resource-assign
+  # agent, was deleted in step 2, so it is free to remove.
+  echo "  single unit — removing any B-side objects left by an earlier pair deployment"
+  for o in "apm/resource/portal-access/~${PART}~${P}-bigip-b-tmui" \
+           "ltm/virtual/~${PART}~${P}-shadow-b-vs" \
+           "ltm/rule/~${PART}~${P}-shadow-b-node"; do
+    curl "${A[@]}" -o /dev/null -w "  DEL ${o##*~} -> %{http_code}\n" -X DELETE "$B/mgmt/tm/${o}"
+  done
+fi
 
 step "9. webtop, form SSO, and one portal resource per unit"
 add "$B/mgmt/tm/apm/sso/form-based" "$(jq -n --arg n "${P}-tmui-sso" \
@@ -269,10 +289,16 @@ mk_portal(){ # mk_portal <name> <facade-ip> <acl-order> <caption>
   #   Syntax Error: "headers" you must specify either "none" or "{"
   #
   # destipaddr steers the portal engine to the facade; referer satisfies TMUI login.jsp CSRF.
-  # Do NOT fold anything else into this command: an items-modify replaces the item block, and
-  # combining it with the caption breaks the parse because of the parentheses in the value.
-  bash_cmd "tmsh modify apm resource portal-access $1 items modify { item1 { headers { { name destipaddr value $2 } { name referer value https://$2:443 } } } }"
+  # The command is COLLECTED rather than run here: /util/bash forks a shell and loads tmsh on
+  # the appliance, so a pair used to pay for two of the most expensive call this build makes.
+  # They are issued together below. Do NOT fold anything else into an items-modify -- it
+  # replaces the item block, and combining it with the caption breaks the parse because of the
+  # parentheses in the value. Separate `tmsh modify` commands joined by `;` are fine: each is
+  # its own statement and neither contains parens.
+  HDR_CMDS+=("tmsh modify apm resource portal-access $1 items modify { item1 { headers { { name destipaddr value $2 } { name referer value https://$2:443 } } } }")
+}
 
+verify_portal(){ # verify_portal <name>
   # Read back from the /items SUB-COLLECTION. The parent object reports these nested fields as
   # null even when they are set correctly, which is a very convincing way to diagnose a bug
   # that does not exist.
@@ -283,17 +309,27 @@ mk_portal(){ # mk_portal <name> <facade-ip> <acl-order> <caption>
   case "$got" in *"sso=MISSING"*|*"headers=0"*) echo "    ^^ portal item is incomplete" >&2 ;; esac
 }
 
+HDR_CMDS=()
 mk_portal "${P}-bigip-a-tmui" "$SHADOW_A" 1 "BIG-IP A (TMUI)"
-mk_portal "${P}-bigip-b-tmui" "$SHADOW_B" 2 "BIG-IP B (TMUI)"
+PORTALS=("/$PART/${P}-bigip-a-tmui")
+if mfa_have_peer; then
+  mk_portal "${P}-bigip-b-tmui" "$SHADOW_B" 2 "BIG-IP B (TMUI)"
+  PORTALS+=("/$PART/${P}-bigip-b-tmui")
+fi
+# Every portal's headers in ONE /util/bash call, then read each back.
+bash_cmd "$(printf '%s; ' "${HDR_CMDS[@]}")echo headers-set"
+for p in "${PORTALS[@]}"; do verify_portal "${p##*/}"; done
 add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-referer-strip" --arg b 'when HTTP_REQUEST {
     if { [HTTP::uri] contains "tmui/login.jsp" } {
         HTTP::header remove "Referer"
     }
 }' '{name:$n,partition:"Common",apiAnonymous:$b}')"
 add "$B/mgmt/tm/apm/profile/connectivity" "$(jq -n --arg n "${P}-connectivity" '{name:$n,partition:"Common",defaultsFrom:"/Common/connectivity"}')"
+# One tile per configured unit. The agent is in the step-2 teardown list, so this list is
+# rebuilt from scratch on every run and a deployment that loses its peer loses the tile.
 add "$B/mgmt/tm/apm/policy/agent/resource-assign" "$(jq -n --arg n "${P}_act_resourceassign_ag" --arg wt "/$PART/${P}-webtop" \
-  --arg pa "/$PART/${P}-bigip-a-tmui" --arg pb "/$PART/${P}-bigip-b-tmui" \
-  '{name:$n,partition:"Common",type:"general",rules:[{portalAccessResources:[$pa,$pb],webtop:$wt}]}')"
+  --argjson pr "$(printf '%s\n' "${PORTALS[@]}" | jq -R . | jq -sc .)" \
+  '{name:$n,partition:"Common",type:"general",rules:[{portalAccessResources:$pr,webtop:$wt}]}')"
 
 step "10. policy graph (one transaction)"
 TID=$(curl "${A[@]}" -X POST -H 'Content-Type: application/json' -d '{}' "$B/mgmt/tm/transaction" | jq -r '.transId')
@@ -347,7 +383,7 @@ add "$B/mgmt/tm/ltm/virtual" "$(jq -n --arg n "${P}-vs" --arg d "/$PART/${VIP_IP
 # default" is not the same claim as "the demo configures the access tier to survive a
 # failover", and only the second one is worth making. Set on the virtual-address, not the
 # virtual server: the address is what carries a traffic group.
-bash_cmd "tmsh modify ltm virtual-address ${VIP_IP} traffic-group ${MFA_APM_TRAFFIC_GROUP:-traffic-group-1}"
-bash_cmd "tmsh save sys config"
+# One call, not two: /util/bash is the expensive shape and these are both plain tmsh.
+bash_cmd "tmsh modify ltm virtual-address ${VIP_IP} traffic-group ${MFA_APM_TRAFFIC_GROUP:-traffic-group-1}; tmsh save sys config"
 
 echo; echo "Done. Browse https://${MFA_WEBTOP_FQDN}/ — logon page, then Keycloak for TOTP, then the webtop."

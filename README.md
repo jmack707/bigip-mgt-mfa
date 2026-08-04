@@ -19,7 +19,7 @@ one page: username + password + one-time code
         |
         v
       webtop  ->  form SSO  ->  BIG-IP A TMUI
-                            ->  BIG-IP B TMUI
+                            ->  BIG-IP B TMUI   (optional second unit)
                                      |
                        remote-role: admin group -> Administrator, everyone else -> Guest
 ```
@@ -47,8 +47,11 @@ one idempotent script builds the access tier. There are no hardcoded addresses.
                              v
                           webtop
                              |-- form SSO --> BIG-IP A TMUI
-                             +-- form SSO --> BIG-IP B TMUI
+                             +-- form SSO --> BIG-IP B TMUI   (optional)
 ```
+
+One tile per BIG-IP you configure. A single unit is a complete deployment — the second is
+added by setting `BIGIP_B_MGMT` and `BIGIP_B_TMUI`, and by nothing else.
 
 ## Why it is shaped this way
 
@@ -80,8 +83,9 @@ in full, including the bypass.
 
 ## What you need
 
-- A BIG-IP with **LTM + APM** licensed. Two makes the failover story real; one is fine
-  (`BIGIP_B_MGMT` is optional). Built and tested on **TMOS 21.1**.
+- A BIG-IP with **LTM + APM** licensed. **One is enough** — a second unit is entirely
+  optional and adds only its own webtop tile and its own remote authentication. Two makes the
+  failover story real. Built and tested on **TMOS 21.1**.
 - A Linux host with Docker and the `docker compose` v2 plugin, reachable from the BIG-IP.
 - A directory. One ships in the stack for demos; point it at your own AD or LDAP instead by
   setting `MFA_DIRECTORY_MODE=external`.
@@ -137,7 +141,7 @@ the scripts. The keys worth knowing:
 | `MFA_DIRECTORY_MODE` | `bundled` | `bundled` ships a directory; `external` uses your AD/LDAP |
 | `MFA_TOTP_PERIOD` | `60` | Seconds per code. 30 for Google Authenticator compatibility |
 | `MFA_TOTP_SKEW` | `1` | Steps of tolerance either side. Multiplies with the period |
-| `BIGIP_B_MGMT` | *(unset)* | Optional. Leave blank for a single BIG-IP |
+| `BIGIP_B_MGMT` | *(unset)* | Optional second BIG-IP. Blank for a single unit; set it with `BIGIP_B_TMUI` for a pair |
 | `MFA_ADMIN_ROLE_ATTRIBUTE` | — | The `memberOf` value that grants Administrator |
 
 `MFA_TOTP_PERIOD` and `MFA_TOTP_SKEW` multiply: a code is accepted for
