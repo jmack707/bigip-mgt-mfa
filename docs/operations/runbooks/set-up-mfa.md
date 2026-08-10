@@ -33,8 +33,8 @@ their existing token.
 
 **2. Enrol the authenticator.** Scan the QR with Google Authenticator, FreeOTP, 1Password or
 any TOTP app. If the QR will not scan — it often will not over a screenshare or a chat client
-— use *Enter a setup key* instead and type the key. The parameters are the defaults: 6
-digits, 30 seconds, SHA1.
+— use *Enter a setup key* instead and type the key. The parameters are printed with the key:
+6 digits, `MFA_TOTP_PERIOD` seconds (60 by default), SHA1.
 
 **3. Push the seeds to the pair.**
 
@@ -42,8 +42,11 @@ digits, 30 seconds, SHA1.
 ./deploy.sh --bigip
 ```
 
-Nothing works until this runs. It loads the seeds into the `bigip_mgt_mfa_totp_dg` data group,
-installs the verification iRule, rebuilds the access policy, and config-syncs to the peer.
+Nothing works until this runs. It **encrypts** the seeds (AES-256, under the key in
+`certs/seed-key.hex`, minted on first run) into the `bigip_mgt_mfa_totp_dg` data group,
+installs the verification iRule that decrypts them, rebuilds the access policy, and
+config-syncs to the peer. Seeds are never written to the appliance in plaintext, so UCS
+archives, qkviews and the sync wire carry only ciphertext.
 
 **4. Log in.** Browse to the webtop VIP and fill in all three fields on the single logon page:
 username, password, and the current code.
@@ -65,6 +68,10 @@ To confirm a seed actually reached the appliance:
 ```bash
 tmsh list ltm data-group internal bigip_mgt_mfa_totp_dg
 ```
+
+The record values are `v2:<iv>:<ciphertext>`, not the seeds themselves — the username being
+present is the confirmation. A record that is *not* in that shape is rejected by the
+verifier as `bad-seed`, so if one appears in plaintext, re-run `./deploy.sh --bigip`.
 
 ## Rollback
 
@@ -91,6 +98,12 @@ BIG-IPs first (`tmsh show sys ntp status`). It is the most common cause and the 
 because nothing else on the appliance misbehaves.
 
 Codes rejected for one user only: their app and the stored seed disagree. Re-enrol them.
+
+One user suddenly rejected after several failed attempts, correct codes included: that is the
+lockout (`MFA_TOTP_MAX_FAILURES`, default 5 failures) doing its job — the log line on the
+BIG-IP says `LOCKED` with the username. It clears itself after `MFA_TOTP_LOCKOUT_SECONDS`
+(default 300); nothing needs resetting by hand. The same log stream (`local0`) is where a
+brute-force attempt against a user's second factor becomes visible.
 
 No user can log in and the logs show the policy ending at Deny from the MFA step: confirm the
 data group is populated on the *active* unit, then see

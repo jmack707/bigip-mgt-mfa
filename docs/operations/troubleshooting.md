@@ -20,6 +20,8 @@ most problems to a component in one run.
 | Webtop appears empty in a scripted check | Resources load asynchronously | [The webtop shows no resources](#the-webtop-shows-no-resources) |
 | Every code rejected, everyone, at once | Clock drift on the appliance | [Every code is rejected, for everyone, all at once](#every-code-is-rejected-for-everyone-all-at-once) |
 | One user's codes rejected | Enrolled but not deployed, or period mismatch | [One user's codes are rejected](#one-users-codes-are-rejected) |
+| A code that just worked is rejected on reuse | Codes are single-use — replay protection | [A just-used code is rejected](#a-just-used-code-is-rejected) |
+| One user rejected even with correct codes, after failures | Lockout after too many wrong codes | [A user is locked out](#a-user-is-locked-out) |
 | New user cannot log in at all | No seed — denial, not a skipped factor | [A brand-new user cannot log in at all](#a-brand-new-user-cannot-log-in-at-all) |
 | Login denied, log names the bind account | Stale AAA object | [Every login is denied and the log blames the bind account](#every-login-is-denied-and-the-log-blames-the-bind-account) |
 | Webtop opens TMUI's login form | SSO not injecting the credential | [The webtop opens TMUI's login form](#the-webtop-opens-tmuis-login-form) |
@@ -197,6 +199,34 @@ tmsh list ltm data-group internal bigip_mgt_mfa_totp_dg
 The other cause is a period mismatch. Google Authenticator ignores the period in the QR and
 always generates 30-second codes, so at the default 60 it produces codes that never match.
 Re-enrol in FreeOTP, Aegis or 1Password, or set `MFA_TOTP_PERIOD=30`.
+
+Record values in that listing are `v2:<iv>:<ciphertext>`, not seeds — the username being
+present is what you are checking. A record **not** in that shape is itself the fault: the
+verifier rejects it as `bad-seed` (the APM log says so), and a re-run of
+`./deploy.sh --bigip` rewrites the store correctly.
+
+## A just-used code is rejected
+
+Intended. Codes are single-use within their acceptance window (RFC 6238 §5.2): once a code
+verifies, presenting it again is denied as a replay and logged with `REPLAYED`. This is most
+often seen re-running `scripts/test-mfa-matrix.sh` twice within one code period — the two
+GRANT cases fail on the second run — and the same applies to running the matrix right after
+`scripts/validate.sh`, whose SSO check performs a real login as the same user. Wait for the
+next period, or read it as the replay protection demonstrating itself. The matrix also
+asserts the denial deliberately, with alice's just-accepted code.
+
+## A user is locked out
+
+One user is rejected even with codes that are visibly correct, immediately after a run of
+failures. That is the verifier's throttle: `MFA_TOTP_MAX_FAILURES` consecutive wrong or
+replayed codes (default 5) refuse the second factor for `MFA_TOTP_LOCKOUT_SECONDS`
+(default 300). The BIG-IP log line says `LOCKED` with the username and client address —
+which is also what a brute-force attempt against that user looks like, so look at the
+addresses before dismissing it as a fumbled phone.
+
+There is nothing to reset: the counter expires on its own, and a successful login clears it.
+Malformed submissions (anything not six digits) are denied without counting, so junk input
+cannot lock anyone out.
 
 ## A brand-new user cannot log in at all
 

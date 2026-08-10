@@ -157,31 +157,59 @@ step "4. TOTP seed store"
 #
 # Seeds come from certs/totp-seeds.env, written by scripts/enroll-totp.sh. Absent that file
 # nobody has a token and every login is denied, which is the correct failure direction.
+#
+# Records are ENCRYPTED before they leave this host. A data group is ordinary configuration:
+# it lands in bigip.conf, in every UCS archive, in qkviews and on the config-sync wire, so a
+# plaintext record publishes every user's second factor to anyone who can read any of those.
+# Each record is written as `v2:<iv-hex>:<ciphertext-base64>` -- AES-256-CBC, a fresh IV per
+# record, under a key minted once into certs/seed-key.hex (gitignored, mode 600) and rendered
+# into the verification iRule in step 5. Deleting the key file mints a new key on the next
+# run; records and iRule are rebuilt together every run, so they cannot disagree.
 SEEDS_FILE="${HERE}/../certs/totp-seeds.env"
+SEED_KEY_FILE="${HERE}/../certs/seed-key.hex"
+if [ ! -s "$SEED_KEY_FILE" ]; then
+  ( umask 077; openssl rand -hex 32 > "$SEED_KEY_FILE" )
+  echo "  minted a new seed-encryption key: certs/seed-key.hex"
+fi
+chmod 600 "$SEED_KEY_FILE"
+MFA_SEED_KEY="$(tr -d '[:space:]' < "$SEED_KEY_FILE")"
+case "$MFA_SEED_KEY" in
+  *[!0-9a-fA-F]*|'') echo "ERROR: certs/seed-key.hex is not a hex string" >&2; exit 1 ;;
+esac
+if [ "${#MFA_SEED_KEY}" -ne 64 ]; then
+  echo "ERROR: certs/seed-key.hex must be exactly 64 hex chars (a 32-byte AES-256 key)" >&2; exit 1
+fi
 RECORDS='[]'
 if [ -f "$SEEDS_FILE" ]; then
   while IFS='=' read -r u sec; do
     case "$u" in ''|\#*) continue;; esac
-    RECORDS=$(jq -c --arg n "$u" --arg d "$sec" '. += [{name:$n,data:$d}]' <<<"$RECORDS")
+    iv=$(openssl rand -hex 16)
+    ct=$(printf '%s' "$sec" | openssl enc -aes-256-cbc -K "$MFA_SEED_KEY" -iv "$iv" -a -A)
+    RECORDS=$(jq -c --arg n "$u" --arg d "v2:${iv}:${ct}" '. += [{name:$n,data:$d}]' <<<"$RECORDS")
   done < "$SEEDS_FILE"
 fi
-echo "  seeds loaded: $(jq -r 'length' <<<"$RECORDS")"
+echo "  seeds loaded: $(jq -r 'length' <<<"$RECORDS") (encrypted at rest in the data group)"
 curl "${A[@]}" -o /dev/null -w "  DEL previous data-group -> %{http_code}\n" -X DELETE "$B/mgmt/tm/ltm/data-group/internal/~${PART}~bigip_mgt_mfa_totp_dg"
 add "$B/mgmt/tm/ltm/data-group/internal" "$(jq -n --argjson r "$RECORDS" '{name:"bigip_mgt_mfa_totp_dg",partition:"Common",type:"string",records:$r}')"
 
 step "5. TOTP verification iRule"
 curl "${A[@]}" -o /dev/null -w "  DEL previous rule -> %{http_code}\n" -X DELETE "$B/mgmt/tm/ltm/rule/~${PART}~${P}-totp-verify"
-# envsubst restricted to our one placeholder so the iRule's own $vars survive untouched.
-# Both placeholders must be listed. envsubst leaves anything unlisted untouched, and an
+# envsubst restricted to our placeholders so the iRule's own $vars survive untouched.
+# Every placeholder must be listed. envsubst leaves anything unlisted untouched, and an
 # unsubstituted ${MFA_TOTP_SKEW} is still VALID Tcl -- it reads a variable of that literal
 # name -- so the rule compiles, uploads, reports success, and then fails at runtime on every
 # login. It does not fail loudly anywhere.
 TOTP_RULE="$(MFA_TOTP_PERIOD="${MFA_TOTP_PERIOD:-60}" MFA_TOTP_SKEW="${MFA_TOTP_SKEW:-1}" \
-  envsubst '${MFA_TOTP_PERIOD} ${MFA_TOTP_SKEW}' < "${HERE}/apm-totp-verify.irule")"
+  MFA_TOTP_MAX_FAILURES="${MFA_TOTP_MAX_FAILURES:-5}" \
+  MFA_TOTP_LOCKOUT_SECONDS="${MFA_TOTP_LOCKOUT_SECONDS:-300}" \
+  MFA_SEED_KEY="$MFA_SEED_KEY" \
+  envsubst '${MFA_TOTP_PERIOD} ${MFA_TOTP_SKEW} ${MFA_TOTP_MAX_FAILURES} ${MFA_TOTP_LOCKOUT_SECONDS} ${MFA_SEED_KEY}' \
+  < "${HERE}/apm-totp-verify.irule")"
 case "$TOTP_RULE" in
   *'${MFA_'*) echo "  ERROR: a placeholder survived envsubst in the TOTP iRule" >&2; exit 1 ;;
 esac
 echo "  TOTP step ${MFA_TOTP_PERIOD:-60}s, skew +/-${MFA_TOTP_SKEW:-1} => a code is accepted for $(( ${MFA_TOTP_PERIOD:-60} * (2 * ${MFA_TOTP_SKEW:-1} + 1) ))s"
+echo "  lockout: ${MFA_TOTP_MAX_FAILURES:-5} failures locks the second factor for ${MFA_TOTP_LOCKOUT_SECONDS:-300}s; codes are single-use per step"
 add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-totp-verify" --arg b "$TOTP_RULE" '{name:$n,partition:"Common",apiAnonymous:$b}')"
 
 step "6. customization groups"
