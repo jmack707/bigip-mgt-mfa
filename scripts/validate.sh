@@ -263,13 +263,30 @@ esac
 #
 # So: log in for real, open a portal resource, and assert that what comes back is the TMUI
 # application rather than its login page.
+#
+# The principal is deliberately NOT one test-mfa-matrix.sh grants. Codes are single-use, so a
+# successful login here spends that user's code for the whole time step; the matrix run in the
+# same period then has its own GRANT cases denied as replays. That is the protection working,
+# but it reads as a broken demo, and it cost real time to diagnose once. The matrix grants
+# alice and bob, so this prefers carol or dave — enrolled by the same deploy, used by nothing
+# else. MFA_SSO_TEST_USER still overrides, and alice remains the last resort so a deployment
+# that only enrolled her is still exercised rather than skipped.
+sso_test_user(){
+  local u
+  for u in "${MFA_SSO_TEST_USER:-}" carol.netops dave.audit alice.admin bob.user; do
+    [ -n "$u" ] || continue
+    [ -n "$(demo_pw "$u")" ] || continue
+    grep -q "^${u}=" "${HERE}/../certs/totp-seeds.env" 2>/dev/null && { printf '%s' "$u"; return 0; }
+  done
+  printf '%s' "${MFA_SSO_TEST_USER:-alice.admin}"
+}
 sect "single sign-on (behaviour, not configuration)"
-if [ -z "$(demo_pw "${MFA_SSO_TEST_USER:-alice.admin}")" ] || [ ! -s "${HERE}/../certs/totp-seeds.env" ]; then
+if [ -z "$(demo_pw "$(sso_test_user)")" ] || [ ! -s "${HERE}/../certs/totp-seeds.env" ]; then
   skip "no demo credentials or TOTP seeds — cannot drive a real login"
 elif ! command -v oathtool >/dev/null 2>&1; then
   skip "oathtool not installed — cannot generate a one-time code"
 else
-  SSO_USER="${MFA_SSO_TEST_USER:-alice.admin}"
+  SSO_USER="$(sso_test_user)"
   SEED=$(grep "^${SSO_USER}=" "${HERE}/../certs/totp-seeds.env" | cut -d= -f2)
   if [ -z "$SEED" ]; then
     skip "${SSO_USER} has no enrolled token — run scripts/enroll-totp.sh"
