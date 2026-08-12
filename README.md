@@ -169,8 +169,11 @@ demo, wider than a real deployment should run. The full reference is
 - **Not a privileged-access design.** The user's own credential reaches TMUI. If the
   requirement is that operators never hold a credential that works on the appliance, that is
   a vault problem — see [Warden](https://github.com/jmack707/warden).
-- **Seeds are credential-equivalent.** They live in a BIG-IP data group and in
-  `certs/totp-seeds.env` (gitignored, mode 600). Anyone who can read either can mint codes.
+- **Seeds are credential-equivalent.** On the BIG-IP they are AES-256 encrypted at rest in
+  the data group (key minted into `certs/seed-key.hex` at deploy time), so backups, qkviews
+  and config-sync carry ciphertext — but an administrator who can read both the data group
+  and the iRule can still recover them, and `certs/totp-seeds.env` (gitignored, mode 600)
+  holds them in plaintext on this host. Anyone who can read that file can mint codes.
 
 ## License
 

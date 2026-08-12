@@ -1,8 +1,9 @@
 # RFC 6238 TOTP verification, computed on the BIG-IP itself.
 #
 # The access policy fires an 'iRule Event' agent with id `totp_verify`. This reads the code
-# the user typed on the logon page, looks up that user's base32 seed, computes the expected
-# code for the current 30-second step, and sets session.custom.totp.verified to 1 on a match.
+# the user typed on the logon page, decrypts that user's base32 seed from the data group,
+# computes the expected code for the current time step, and sets
+# session.custom.totp.verified to 1 on a match.
 #
 # There is no network call here. That is the point: the earlier Keycloak design had to reach
 # an external service mid-policy, and a sideband connect that never returned took the whole
@@ -12,14 +13,25 @@
 # logon submission selects the seed here and was bound to the password by the LDAP Auth step
 # immediately before. There is no way to pair one user's password with another's token.
 #
-# The seed lives in the bigip_mgt_mfa_totp_dg data group rather than in the directory. That is
-# deliberate and mirrors how a real MFA product works: the directory owns identity, the MFA
-# verifier owns token secrets. It also avoids putting a credential-equivalent secret on the
-# user's directory entry, where anything that can read the entry could mint valid codes.
+# The seed lives in the bigip_mgt_mfa_totp_dg data group rather than in the directory, and it
+# lives there ENCRYPTED: each record is `v2:<iv-hex>:<ciphertext-base64>`, AES-256-CBC under
+# a key minted at deploy time (certs/seed-key.hex) and rendered into this rule. A data group
+# is ordinary configuration -- it appears in bigip.conf, in every UCS archive, in qkviews and
+# over config-sync -- so a plaintext record hands every user's second factor to anyone who can
+# read any of those. Encryption keeps all of them ciphertext. Be honest about the boundary:
+# an administrator who can read BOTH the data group and this rule can still recover seeds.
+# What moved is the exposure surface, not the trust in the box itself.
 #
-# A +/-1 step window is accepted, which is the RFC's own recommendation: it absorbs clock
-# skew between the phone and the BIG-IP without meaningfully widening the attack surface.
-# Keep the BIG-IP's NTP honest or this is the first thing that breaks.
+# RFC 6238 obliges a verifier to do two more things than compare codes, and this rule does
+# both. A code is single-use: a successful step is remembered in the session table for the
+# width of the acceptance window and a second presentation is denied (section 5.2). And
+# guessing is throttled: MFA_TOTP_MAX_FAILURES consecutive failures lock the user's second
+# factor for MFA_TOTP_LOCKOUT_SECONDS (section 5.2 again -- six digits are only adequate
+# when attempts are bounded). A successful verification clears the counter.
+#
+# Failures are logged to local0 with the username and client IP -- never the code typed, the
+# expected code, or the seed. A brute-force attempt should be visible in the logs and a seed
+# should never be.
 #
 # The step size is rendered in from MFA_TOTP_PERIOD at upload time. Note that a longer period
 # widens the acceptance window proportionally: at 60s, +/-1 step means a code stays valid for
@@ -34,27 +46,81 @@ when ACCESS_POLICY_AGENT_EVENT {
         ACCESS::session data set session.custom.totp.verified 0
 
         set user [ACCESS::session data get session.logon.last.username]
-        set code [ACCESS::session data get session.logon.last.otp]
+        set code [string trim [ACCESS::session data get session.logon.last.otp]]
+        set cip  [ACCESS::session data get session.user.clientip]
         if { $user equals "" } { return }
-        if { $code equals "" } { return }
 
-        # The seed for this user. No entry means no enrolled token, which is a denial --
-        # never a pass. An un-enrolled account must not skip the second factor.
-        set b32 [string toupper [class lookup $user bigip_mgt_mfa_totp_dg]]
-        if { $b32 equals "" } {
-            ACCESS::session data set session.custom.totp.err "no-token"
+        # --- input validation: exactly six digits, before any table or crypto work ---
+        # An empty or malformed submission is denied but NOT counted toward lockout: it
+        # cannot be a meaningful guess, and counting it would let junk submissions lock a
+        # user out without a single real attempt.
+        if { !([string length $code] == 6 && [string is digit -strict $code]) } {
+            ACCESS::session data set session.custom.totp.err "bad-code-format"
+            log local0.notice "bigip-mgt-mfa totp: malformed code for user=$user from=$cip"
             return
         }
 
-        # --- base32 decode (RFC 4648) into a byte string ---
+        # --- lockout gate: refuse before verifying, however correct the code is ---
+        set fkey "bigip_mgt_mfa:totp:fail:$user"
+        set fails [table lookup -notouch $fkey]
+        if { $fails ne "" && $fails >= ${MFA_TOTP_MAX_FAILURES} } {
+            ACCESS::session data set session.custom.totp.err "locked"
+            log local0.warn "bigip-mgt-mfa totp: user=$user from=$cip locked out ($fails failures, window ${MFA_TOTP_LOCKOUT_SECONDS}s)"
+            return
+        }
+
+        # The seed record for this user. No entry means no enrolled token, which is a
+        # denial -- never a pass. An un-enrolled account must not skip the second factor.
+        set rec [class lookup $user bigip_mgt_mfa_totp_dg]
+        if { $rec equals "" } {
+            ACCESS::session data set session.custom.totp.err "no-token"
+            log local0.notice "bigip-mgt-mfa totp: no enrolled token for user=$user from=$cip"
+            return
+        }
+
+        # --- decrypt the record: v2:<iv-hex>:<ciphertext-base64> ---
+        # Anything that is not exactly that shape fails closed as bad-seed, including a
+        # legacy plaintext record: silently accepting one would quietly reopen the
+        # cleartext-at-rest hole this format exists to close.
+        set parts [split $rec ":"]
+        if { [llength $parts] != 3 || [lindex $parts 0] ne "v2" } {
+            ACCESS::session data set session.custom.totp.err "bad-seed"
+            log local0.err "bigip-mgt-mfa totp: record for user=$user is not a v2 encrypted record -- re-run deploy.sh --bigip"
+            return
+        }
+        if { [catch {
+            set iv  [binary format H* [lindex $parts 1]]
+            set ct  [b64decode [lindex $parts 2]]
+            set kk  [binary format H* ${MFA_SEED_KEY}]
+            set b32 [CRYPTO::decrypt -alg aes-256-cbc -key $kk -iv $iv $ct]
+        }] || $ct eq "" } {
+            ACCESS::session data set session.custom.totp.err "bad-seed"
+            log local0.err "bigip-mgt-mfa totp: seed decrypt failed for user=$user -- key/record mismatch, re-run deploy.sh --bigip"
+            return
+        }
+        # Strip PKCS#7 padding if the platform left it on. Base32 characters are all
+        # >= 0x32, so a trailing byte in 1..16 can only be padding, never seed.
+        set plen [string length $b32]
+        if { $plen > 0 } {
+            binary scan [string index $b32 end] c pad
+            set pad [expr {$pad & 0xff}]
+            if { $pad >= 1 && $pad <= 16 && $pad <= $plen } {
+                set b32 [string range $b32 0 [expr {$plen - $pad - 1}]]
+            }
+        }
+        set b32 [string toupper [string trim $b32]]
+
+        # --- base32 decode (RFC 4648) into a byte string, STRICTLY ---
+        # An invalid character fails the whole seed rather than being skipped. Skipping
+        # turns a corrupted record into "some" key that fails as a code mismatch, which
+        # points an investigation at the user's phone instead of at the record.
         set alpha "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-        # Build the bit string 5 bits at a time, then repack into bytes. Explicit and
-        # readable beats clever bit-twiddling in Tcl.
         set bitstr ""
+        set seed_ok 1
         foreach ch [split $b32 ""] {
             if { $ch equals "=" } { continue }
             set idx [string first $ch $alpha]
-            if { $idx < 0 } { continue }
+            if { $idx < 0 } { set seed_ok 0 ; break }
             binary scan [binary format c $idx] B8 b
             append bitstr [string range $b 3 7]
         }
@@ -64,15 +130,20 @@ when ACCESS_POLICY_AGENT_EVENT {
             set byte [string range $bitstr [expr {$i * 8}] [expr {$i * 8 + 7}]]
             append key [binary format B8 $byte]
         }
-        if { [string length $key] == 0 } {
+        # RFC 4226 section 4: the shared secret must be at least 128 bits.
+        if { $seed_ok == 0 || [string length $key] < 16 } {
             ACCESS::session data set session.custom.totp.err "bad-seed"
+            log local0.err "bigip-mgt-mfa totp: decrypted seed for user=$user is not valid base32 of >= 16 bytes"
             return
         }
 
-        # --- compare against this step and its immediate neighbours ---
+        # --- compare against this step and its neighbours; remember WHICH step matched ---
+        # The loop always runs the full window rather than exiting on the first hit: the
+        # matched counter is needed for replay tracking, and a fixed amount of work per
+        # attempt is cheap insurance against timing inference.
         set step [expr {[clock seconds] / ${MFA_TOTP_PERIOD}}]
         set skew ${MFA_TOTP_SKEW}
-        set ok 0
+        set matched ""
         for { set d [expr {0 - $skew}] } { $d <= $skew } { incr d } {
             set ctr [expr {$step + $d}]
             set msg [binary format W $ctr]
@@ -85,13 +156,43 @@ when ACCESS_POLICY_AGENT_EVENT {
             set p3 [expr {[lindex $bytes [expr {$off + 3}]] & 0xff}]
             set bin [expr {($p0 << 24) | ($p1 << 16) | ($p2 << 8) | $p3}]
             set want [format %06d [expr {$bin % 1000000}]]
-            if { $want equals $code } { set ok 1 }
+            if { $want equals $code } { set matched $ctr }
         }
 
-        if { $ok == 1 } {
-            ACCESS::session data set session.custom.totp.verified 1
-        } else {
+        if { $matched eq "" } {
+            # A real wrong code: count it. The counter both times out and expires after
+            # the lockout window, so a locked user recovers by waiting, not by a call.
+            set n 1
+            if { $fails ne "" } { set n [expr {$fails + 1}] }
+            table set $fkey $n ${MFA_TOTP_LOCKOUT_SECONDS} ${MFA_TOTP_LOCKOUT_SECONDS}
             ACCESS::session data set session.custom.totp.err "mismatch"
+            if { $n >= ${MFA_TOTP_MAX_FAILURES} } {
+                log local0.warn "bigip-mgt-mfa totp: code mismatch for user=$user from=$cip -- failure $n of ${MFA_TOTP_MAX_FAILURES}, LOCKED for ${MFA_TOTP_LOCKOUT_SECONDS}s"
+            } else {
+                log local0.warn "bigip-mgt-mfa totp: code mismatch for user=$user from=$cip (failure $n of ${MFA_TOTP_MAX_FAILURES})"
+            }
+            return
         }
+
+        # --- replay: a code is single-use within its acceptance window (RFC 6238 5.2) ---
+        # Keyed by user AND matched counter, held for the window's width -- after that the
+        # step has fallen out of the window and the marker is moot. A replay is counted as
+        # a failure too: a correct-but-used code arriving again is an attack signal, not a
+        # typo.
+        set window [expr {${MFA_TOTP_PERIOD} * (2 * ${MFA_TOTP_SKEW} + 1)}]
+        set rkey "bigip_mgt_mfa:totp:used:${user}:${matched}"
+        if { [table lookup -notouch $rkey] ne "" } {
+            set n 1
+            if { $fails ne "" } { set n [expr {$fails + 1}] }
+            table set $fkey $n ${MFA_TOTP_LOCKOUT_SECONDS} ${MFA_TOTP_LOCKOUT_SECONDS}
+            ACCESS::session data set session.custom.totp.err "replay"
+            log local0.warn "bigip-mgt-mfa totp: REPLAYED code for user=$user from=$cip -- already used this step"
+            return
+        }
+        table set $rkey 1 $window $window
+
+        table delete $fkey
+        ACCESS::session data set session.custom.totp.verified 1
+        log local0.info "bigip-mgt-mfa totp: verified user=$user from=$cip"
     }
 }

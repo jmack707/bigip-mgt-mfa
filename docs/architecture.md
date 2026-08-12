@@ -20,8 +20,8 @@ pays almost nothing.
 | Component | Runs where | Responsibility |
 |---|---|---|
 | APM access policy `bigip-mgt-mfa` | BIG-IP A, config-synced to B | Logon page, LDAP authentication, TOTP verification, webtop, form SSO into each TMUI |
-| `bigip-mgt-mfa-totp-verify` iRule | BIG-IP, on the webtop virtual | Computes the expected RFC 6238 code and compares it to what was typed |
-| `bigip_mgt_mfa_totp_dg` data group | BIG-IP, config-synced | One base32 seed per enrolled user |
+| `bigip-mgt-mfa-totp-verify` iRule | BIG-IP, on the webtop virtual | Decrypts the seed, computes the expected RFC 6238 code, enforces single-use and lockout |
+| `bigip_mgt_mfa_totp_dg` data group | BIG-IP, config-synced | One AES-256-encrypted base32 seed per enrolled user (`v2:<iv>:<ciphertext>`) |
 | OpenLDAP | Docker, `bundled` profile | Demo directory and its principals. Absent in external mode |
 | CoreDNS | Docker | Authoritative for the demo zone; forwards everything else |
 | `auth ldap system-auth` + `auth source` | Each BIG-IP, device-local (not synced) | Authenticates the SSO'd credential against the directory |
@@ -33,11 +33,15 @@ pays almost nothing.
    with three fields: username, password, one-time code.
 2. APM binds the submitted credential to the directory (`aaa-ldap`, type `auth`). A failure
    ends the policy at Deny. The password is now in the session.
-3. The TOTP iRule fires. It looks up that username's seed in the data group, computes the
-   expected code for the current time step (and the configured tolerance either side), and
-   compares. No network call leaves the appliance.
+3. The TOTP iRule fires. It validates the submitted code's shape, checks the user is not
+   locked out, decrypts that username's seed from the data group, computes the expected code
+   for the current time step (and the configured tolerance either side), and compares. No
+   network call leaves the appliance.
 4. Anything other than a match ends the policy at Deny — a failed second factor must never
-   degrade to first-factor-only access.
+   degrade to first-factor-only access. A code that already verified once within its window
+   is denied as a replay, and repeated failures lock the user's second factor for a cooldown
+   (both RFC 6238 §5.2 obligations; see
+   [adr/0006-encrypt-seeds-and-enforce-verifier-behaviour.md](adr/0006-encrypt-seeds-and-enforce-verifier-behaviour.md)).
 5. SSO Credential Mapping copies `session.logon.last.username` and `.password` into the SSO
    token. Resource Assign publishes the webtop and one portal resource per unit.
 6. Selecting a resource makes APM open that unit's TMUI through its façade and submit the
@@ -57,10 +61,15 @@ to pair one user's password with another user's token.
 - **The directory is authoritative for authorization, and the BIG-IP evaluates it.** APM does
   not decide the role and cannot: a user logging directly into TMUI gets the same answer. See
   [adr/0003-authorization-on-remote-role.md](adr/0003-authorization-on-remote-role.md).
-- **Seeds are credential-equivalent.** They live in a BIG-IP data group and in
-  `certs/totp-seeds.env` (mode 600, gitignored). Anyone who can read either can mint valid
-  codes for that user. They are deliberately *not* stored on the directory entry, where
-  anything able to read the entry could do the same.
+- **Seeds are credential-equivalent, and the data group copy is encrypted.** Records in the
+  data group are AES-256-CBC ciphertext under a key minted into `certs/seed-key.hex` and
+  rendered into the verification iRule, so `bigip.conf`, UCS archives, qkviews and the
+  config-sync wire never carry a seed in the clear. The boundary is stated honestly: an
+  administrator who can read both the data group and the iRule can still recover seeds —
+  encryption narrows the exposure surface, it does not remove trust in the appliance.
+  `certs/totp-seeds.env` (mode 600, gitignored) holds the plaintext on the deploy host, and
+  anyone who can read it can mint valid codes. Seeds are deliberately *not* stored on the
+  directory entry, where anything able to read the entry could do the same.
 - **`admin` and `root` stay local on TMOS.** Switching the auth source to LDAP cannot lock
   anyone out of the box.
 

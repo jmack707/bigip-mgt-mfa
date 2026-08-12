@@ -7,7 +7,7 @@
 #
 # This is the piece a commercial MFA product would give you as a self-service portal. It is
 # a script here because bigip-mgt-mfa deliberately has no MFA server -- see
-# docs/adr/0006-apm-native-totp.md for what that buys and what it costs.
+# docs/adr/0002-verify-totp-on-the-bigip.md for what that buys and what it costs.
 #
 # Usage:  scripts/enroll-totp.sh <username> [<username> ...]
 #         scripts/enroll-totp.sh --list

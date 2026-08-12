@@ -337,6 +337,55 @@ so the defaults accept a code for **three minutes**. `0` accepts only the curren
 what a real deployment should run, provided NTP on the units is trustworthy. `deploy.sh`
 prints the computed window on every build rather than leaving it to be worked out.
 
+### `MFA_TOTP_MAX_FAILURES`
+Type: integer. Default: `5`. Required: no.
+
+How many consecutive wrong or replayed codes a user may submit before their second factor is
+refused outright — however correct the next code is. RFC 6238 §5.2 requires a verifier to
+throttle: a six-digit code is only an adequate secret while guessing is bounded. A successful
+verification clears the counter; a malformed submission (not six digits) is denied but not
+counted, so junk input cannot lock a user out. Each lockout and each counted failure is
+logged to `local0` with the username and client IP.
+
+### `MFA_TOTP_LOCKOUT_SECONDS`
+Type: integer (seconds). Default: `300`. Required: no.
+
+How long the refusal lasts once `MFA_TOTP_MAX_FAILURES` is reached, and also how long the
+failure counter itself lives. Recovery is by waiting — the counter times out on the
+appliance; there is nothing to reset by hand. (Restarting is not needed; if an operator must
+clear one early, re-running `./deploy.sh --bigip` rebuilds the policy and starts the session
+table fresh.)
+
+### Codes are single-use
+
+Independent of both keys above, a code that verifies successfully is remembered — keyed by
+user and time step in the session table, for exactly the width of the acceptance window —
+and a second presentation of it is denied and counted as a failure. This is the other
+verifier obligation in RFC 6238 §5.2, and it is why re-running
+`scripts/test-mfa-matrix.sh` twice within one code period shows the two GRANT cases denied
+as replays on the second run: wait for the next period, or read it as the protection
+demonstrating itself.
+
+### Seed storage and the encryption key
+
+Seeds are **AES-256-CBC encrypted before they are written into the BIG-IP data group**. Each
+record in `bigip_mgt_mfa_totp_dg` has the form `v2:<iv-hex>:<ciphertext-base64>`, with a
+fresh IV per record. A data group is ordinary configuration — it appears in `bigip.conf`, in
+every UCS archive, in qkviews and on the config-sync wire — so a plaintext record would
+publish every user's second factor to anyone able to read any of those. With encryption, all
+of them see ciphertext, and a record that is not in the `v2` shape (including a legacy
+plaintext one) is rejected as `bad-seed` rather than accepted.
+
+The key is minted automatically into `certs/seed-key.hex` (gitignored, mode 600) on the
+first `./deploy.sh --bigip` and rendered into the verification iRule at upload time; records
+and iRule are rebuilt together on every run, so they cannot disagree. To rotate the key,
+delete the file and re-deploy. Be honest about the boundary: a BIG-IP administrator who can
+read both the data group and the iRule can still recover seeds — what the encryption changes
+is the exposure surface (backups, qkviews, sync captures, config read access), not the trust
+placed in the appliance itself. The plaintext enrolment record on this host,
+`certs/totp-seeds.env`, remains the most sensitive file in the deployment and is the reason
+`certs/` is gitignored.
+
 ## Demo principals and roles
 
 The bundled directory seeds four principals whose *only* difference is group membership.
