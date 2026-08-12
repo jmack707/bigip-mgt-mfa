@@ -75,6 +75,7 @@ if [ "$DO_BIGIP" = 1 ]; then
     "apm/sso/form-based/~${PART}~${P}-tmui-sso" \
     "apm/profile/connectivity/~${PART}~${P}-connectivity" \
     "ltm/rule/~${PART}~${P}-shadow-a-node" "ltm/rule/~${PART}~${P}-shadow-b-node" \
+    "ltm/snatpool/~${PART}~${P}-facade-snat" \
     "ltm/rule/~${PART}~${P}-referer-strip" \
     "apm/aaa/oauth-server/~${PART}~${P}-oauth-server" \
     "apm/aaa/oauth-request/~${PART}~${P}-auth-redirect" \

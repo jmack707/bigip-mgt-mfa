@@ -27,6 +27,8 @@ most problems to a component in one run.
 | Webtop opens TMUI's login form | SSO not injecting the credential | [The webtop opens TMUI's login form](#the-webtop-opens-tmuis-login-form) |
 | REST 401/502, demo still serving | restjavad wedged — data plane unaffected | [iControl REST stops answering](#icontrol-rest-stops-answering) |
 | Portal resource fails with errorcode 17 | Reserved target address | [Portal access refuses the target](#portal-access-refuses-the-target) |
+| Tile resets, `PR_CONNECT_RESET_ERROR`, everything else green | Façade SNAT source equals the `node` target | [A webtop tile resets instead of opening TMUI](#a-webtop-tile-resets-instead-of-opening-tmui) |
+| LDAP bind fails right after adding a self IP | The new address became TMM's egress source | [Adding a self IP breaks the LDAP bind](#adding-a-self-ip-breaks-the-ldap-bind) |
 
 ## A read-only user returns 401
 Testing roles with `curl` against iControl REST reports the read-only user as broken:
@@ -152,6 +154,99 @@ tmsh run util bash -c "sessiondump --allkeys | grep assigned.resources.pa | tail
 ```
 
 A healthy session lists both portal resources. `scripts/demo-login.sh` asserts against this.
+
+## A webtop tile resets instead of opening TMUI
+
+The login succeeds, the webtop lists its tiles, and clicking one lands on the browser's own
+error page — Firefox says `Secure Connection Failed` with `PR_CONNECT_RESET_ERROR`. Everything
+else is green, including `scripts/validate.sh`.
+
+On the wire the façade looks healthy right up to the point where it isn't:
+
+```text
+IP 10.1.1.13.59178 > 192.0.2.5.443: [S]    in  lis=/Common/bigip-mgt-mfa-shadow-a-vs
+IP 192.0.2.5.443 > 10.1.1.13.59178: [S.]   out lis=/Common/bigip-mgt-mfa-shadow-a-vs
+IP 10.1.1.13.59178 > 192.0.2.5.443: [P.] seq 1:177    length 176      ← TLS ClientHello
+IP 192.0.2.5.443 > 10.1.1.13.59178: [.] ack 177                       ← acknowledged
+      ← ten seconds of nothing →
+IP 10.1.1.13.59178 > 192.0.2.5.443: [R.]                              ← client gives up
+```
+
+The façade accepted the connection, so routing to it is fine. With a plain TCP profile TMM
+opens the **server-side** connection only after that first data, so ten seconds of silence
+then a reset means the last hop — `node <self-ip> 443` — went unanswered.
+
+The usual cause on a **single BIG-IP** is the façade's source address. SNAT `automap` picks a
+self IP on the egress VLAN; where that VLAN has only one address, it is the `node` target
+itself, and TMM will not complete a connection whose source equals its destination. The same
+is true on the **standby** unit of a pair, where the floating addresses are inactive.
+
+Reproduce or exonerate it in one command on the appliance, with no browser, session or webtop
+involved:
+
+```bash
+curl -sk -o /dev/null --max-time 8 -w '%{http_code} %{time_total}s\n' https://192.0.2.5/tmui/login.jsp
+```
+
+`200` in hundredths of a second is healthy. `000` after ~4s is this fault. Then confirm the
+source and the target are the same address:
+
+```bash
+tmsh list ltm virtual bigip-mgt-mfa-shadow-a-vs source-address-translation
+tmsh list ltm rule bigip-mgt-mfa-shadow-a-node
+tmsh list net self
+```
+
+The fix is to stop leaving the source to `automap` and pin it to an address that is never the
+`node` target:
+
+```bash
+tmsh create ltm snatpool bigip-mgt-mfa-facade-snat { members add { 10.1.20.240 } }
+tmsh modify ltm virtual bigip-mgt-mfa-shadow-a-vs \
+  source-address-translation { type snat pool bigip-mgt-mfa-facade-snat }
+tmsh save sys config
+```
+
+`bigip/apm-build.sh` does this automatically now — same configuration on a standalone unit and
+on a pair — so **a redeploy is the durable fix**; the commands above are for a unit already
+built. The address never leaves the appliance, so it needs no route.
+
+Two fixes that look obvious and do **not** work, both tried:
+
+- **`source-address-translation none`** fails — `000` after 8 s on nora, and likewise on a
+  standalone UDF unit. It makes the hop depend on whatever address the portal engine's
+  connection happens to carry, which the build does not control.
+- **Adding a self IP** so `automap` has another address to pick is not portable — see
+  [Adding a self IP breaks the LDAP bind](#adding-a-self-ip-breaks-the-ldap-bind).
+
+[ADR 0007](../adr/0007-facade-source-address.md) records the measurements behind all three.
+
+## Adding a self IP breaks the LDAP bind
+
+Every login starts failing at the LDAP step immediately after adding a self IP — typically
+while trying to give SNAT automap a second address to choose from.
+
+TMM prefers a **floating** self IP as the source for its own outbound connections, so a new
+floating address silently becomes the source for APM's LDAP queries. Whether that works
+depends on the fabric, not on the BIG-IP: UDF and most cloud networks drop traffic from an
+address they have not assigned to the interface, so the bind leaves and nothing comes back.
+
+Compare the source address before and after:
+
+```bash
+tcpdump -nni 0.0 host <directory-ip> and port 389
+```
+
+A healthy bind shows the SYN sourced from the unit's original self IP and answered:
+
+```text
+IP 10.1.20.4.20070 > 10.1.20.14.389: [S]     out
+IP 10.1.20.14.389 > 10.1.20.4.20070: [S.]    in
+```
+
+If the SYN now carries the newly added address and no `[S.]` returns, remove the address. In
+environments that filter unassigned sources, no added address — floating self IP or SNAT pool
+member — is usable, which is why the façade fix uses no translation at all.
 
 ## Portal access refuses the target
 Creating or using a portal resource fails with `01490585` / `errorcode=17`.

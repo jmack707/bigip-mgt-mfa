@@ -13,6 +13,20 @@ All notable changes to this project are documented here. The format follows
   `DENY (expected GRANT)`. The probe now picks a principal the matrix does not grant
   (`carol.netops`, else `dave.audit`, falling back to `alice.admin` only if neither is
   enrolled); `MFA_SSO_TEST_USER` still overrides.
+- **The webtop tile works on a single BIG-IP.** The façade virtual was built with SNAT
+  `automap`, which picks a self IP on the egress VLAN — on a standalone unit (and on the
+  standby half of a pair) the only address there is the `node` target itself, and TMM will not
+  complete a connection whose source equals its destination. The tile completed its TLS
+  handshake with the façade and then reset after ten seconds (`PR_CONNECT_RESET_ERROR`) while
+  every configured object, and `validate.sh`, read as correct. `bigip/apm-build.sh` now pins
+  the source with a dedicated SNAT pool (`MFA_FACADE_SNAT_ADDR`, default `.240` on
+  `BIGIP_A_TMUI`'s subnet) — **one configuration for standalone and HA alike** — and PATCHes
+  the pool member and each virtual on every run so existing deployments converge. See
+  [ADR 0007](docs/adr/0007-facade-source-address.md).
+- `scripts/validate.sh` **drives** each façade — one `/util/bash` call fetches TMUI's login
+  page through `192.0.2.5`/`.6` from the appliance — instead of only asserting that the portal
+  resource, its SSO and the façade virtual exist. All of those passed on a deployment whose
+  tile could not open at all.
 
 ### Security
 - **TOTP seeds are encrypted at rest on the BIG-IP.** Data-group records are now

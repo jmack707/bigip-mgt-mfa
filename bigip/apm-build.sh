@@ -262,10 +262,60 @@ bash_cmd "tmsh modify sys db tmm.tcl.rule.connect.allow_loopback_addresses value
 add "$B/mgmt/tm/ltm/rule" "$(jq -n --arg n "${P}-shadow-a-node" --arg b "when CLIENT_ACCEPTED {
     node ${BIGIP_A_TMUI} 443
 }" '{name:$n,partition:"Common",apiAnonymous:$b}')"
+# Source address for the façade's server-side connection -- and it MUST differ by shape.
+#
+# On a PAIR, SNAT automap picks the floating self IP, which is a different address from the
+# `node` target, and the hop works. On a SINGLE unit the only address on that VLAN IS the
+# node target, so automap produces a connection whose source equals its destination and TMM
+# never completes it. The failure is silent and expensive to read: the tile completes its TLS
+# handshake with the façade, the ClientHello is ACKed, then nothing for ten seconds and a
+# reset -- ERR/PR_CONNECT_RESET_ERROR in the browser, while every configured object and every
+# check in validate.sh looks perfect. Reproduced deliberately on the nora pair by pinning the
+# SNAT source to the node target: 200 in 0.07s became 000 in 4s, three times, and reverted.
+#
+# Two fixes were tried and BOTH are wrong, which is why this pins the source explicitly.
+#
+#   `none` -- leave the client's own address as the source. Worked on a single UDF unit and
+#   FAILED on both nora units (000 after 8s, tile dead), because it makes the hop depend on
+#   whatever address the portal engine's connection happens to carry.
+#
+#   "add a floating self IP so automap has a choice" -- not portable. UDF filters source
+#   addresses it has not assigned, and adding a floating one there moved TMM's egress source
+#   and broke the LDAP bind outright. On a standalone unit a self IP in traffic-group-1 does
+#   not even survive, since there is no device group to own it.
+#
+# A dedicated SNAT pool is deterministic: the source is an address we choose, it is never the
+# node target, and it does not depend on automap's preference, the client's address, or the
+# unit's HA shape. Measured on solo bigip-a: automap 000 in 8.0s, none 000 in 8.0s, SNAT pool
+# 200 in 0.061s. The address never leaves the appliance -- the hop is TMM to its own self IP --
+# so it needs no route and nothing in the fabric sees it.
+SHADOW_SNAT_POOL="${P}-facade-snat"
+SHADOW_SNAT_ADDR="${MFA_FACADE_SNAT_ADDR:-}"
+if [ -z "$SHADOW_SNAT_ADDR" ]; then
+  # Derive from unit A's TMUI address: same subnet, host .240, which is outside the lab's
+  # allocation and cannot collide with the node target.
+  SHADOW_SNAT_ADDR="${BIGIP_A_TMUI%.*}.240"
+fi
+echo "  façade SNAT source: ${SHADOW_SNAT_ADDR} (never the node target)"
+add "$B/mgmt/tm/ltm/snatpool" "$(jq -n --arg n "$SHADOW_SNAT_POOL" --arg m "$SHADOW_SNAT_ADDR" \
+  '{name:$n,partition:"Common",members:[$m]}')"
+# Converge the member too: the create tolerates 409, so a pool built with a different address
+# would keep it forever.
+curl "${A[@]}" -o /dev/null -w "  PATCH snatpool member -> %{http_code}\n" \
+  -X PATCH -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg m "$SHADOW_SNAT_ADDR" '{members:[$m]}')" \
+  "$B/mgmt/tm/ltm/snatpool/~${PART}~${SHADOW_SNAT_POOL}"
 mk_shadow_vs(){ # mk_shadow_vs <name> <facade-ip> <irule>
-  add "$B/mgmt/tm/ltm/virtual" "$(jq -n --arg n "$1" --arg d "/$PART/$2:443" --arg ir "/$PART/$3" \
+  add "$B/mgmt/tm/ltm/virtual" "$(jq -n --arg n "$1" --arg d "/$PART/$2:443" --arg ir "/$PART/$3" --arg sp "/$PART/$SHADOW_SNAT_POOL" \
     '{name:$n,partition:"Common",destination:$d,mask:"255.255.255.255",ipProtocol:"tcp",
-      profiles:[{name:"/Common/tcp"}],rules:[$ir],sourceAddressTranslation:{type:"automap"}}')"
+      profiles:[{name:"/Common/tcp"}],rules:[$ir],sourceAddressTranslation:{type:"snat",pool:$sp}}')"
+  # The create tolerates 409, so an existing virtual would keep whatever translation it was
+  # built with -- including the `automap` that cannot work on a single unit. PATCH it
+  # explicitly so an existing deployment converges rather than staying broken.
+  curl "${A[@]}" -o /dev/null -w "  PATCH ${1##*-mfa-} snat -> %{http_code}\n" \
+    -X PATCH -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg sp "/$PART/$SHADOW_SNAT_POOL" '{sourceAddressTranslation:{type:"snat",pool:$sp}}')" \
+    "$B/mgmt/tm/ltm/virtual/~${PART}~$1"
 }
 mk_shadow_vs "${P}-shadow-a-vs" "$SHADOW_A" "${P}-shadow-a-node"
 if mfa_have_peer; then
