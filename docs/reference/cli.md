@@ -208,6 +208,13 @@ read-only user answers `401` to `curl` — a status-code test would read the dem
 the demo broken. The `pam_audit` line records the role TMOS actually assigned, which is the
 question being asked.
 
+The SSO probe drives a **real login**, so it deliberately uses a principal
+`test-mfa-matrix.sh` does not grant — `carol.netops`, falling back to `dave.audit`, and to
+`alice.admin` only if neither is enrolled. Codes are single-use, so signing in as alice here
+would spend her code for the whole time step and the matrix would then deny its own GRANT
+case as a replay. `MFA_SSO_TEST_USER` overrides the choice; pointing it at alice or bob
+recreates that collision by hand.
+
 All four logins are fired first and the audit log is then read **once per unit**, rather than
 once per user. `/mgmt/tm/util/bash` forks a shell and loads `tmsh` on the appliance, making it
 the most expensive call either script issues; batching takes a pair from eight of them to two

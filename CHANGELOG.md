@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `scripts/validate.sh` and `scripts/test-mfa-matrix.sh` can run back to back again. The SSO
+  probe performs a real login, and with codes now single-use that spent `alice.admin`'s code
+  for the whole time step — the matrix, run next, reported its own GRANT case as
+  `DENY (expected GRANT)`. The probe now picks a principal the matrix does not grant
+  (`carol.netops`, else `dave.audit`, falling back to `alice.admin` only if neither is
+  enrolled); `MFA_SSO_TEST_USER` still overrides.
+
 ### Security
 - **TOTP seeds are encrypted at rest on the BIG-IP.** Data-group records are now
   `v2:<iv>:<ciphertext>` — AES-256-CBC under a key minted into `certs/seed-key.hex` and

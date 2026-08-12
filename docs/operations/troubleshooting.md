@@ -210,10 +210,16 @@ verifier rejects it as `bad-seed` (the APM log says so), and a re-run of
 Intended. Codes are single-use within their acceptance window (RFC 6238 §5.2): once a code
 verifies, presenting it again is denied as a replay and logged with `REPLAYED`. This is most
 often seen re-running `scripts/test-mfa-matrix.sh` twice within one code period — the two
-GRANT cases fail on the second run — and the same applies to running the matrix right after
-`scripts/validate.sh`, whose SSO check performs a real login as the same user. Wait for the
-next period, or read it as the replay protection demonstrating itself. The matrix also
-asserts the denial deliberately, with alice's just-accepted code.
+GRANT cases fail on the second run. Wait for the next period, or read it as the replay
+protection demonstrating itself. The matrix also asserts the denial deliberately, with
+alice's just-accepted code.
+
+Running `validate.sh` immediately before the matrix used to trip the same wire: its SSO check
+performs a real login, which spent alice's code for that step, and the matrix then reported
+`alice: correct pw + her own OTP -> DENY (expected GRANT)` — the protection working, reading
+as a broken demo. `validate.sh` now drives that probe as a principal the matrix does not
+grant (`carol.netops`, else `dave.audit`), so the two scripts can run back to back. Setting
+`MFA_SSO_TEST_USER` to `alice.admin` or `bob.user` reintroduces the collision by hand.
 
 ## A user is locked out
 
