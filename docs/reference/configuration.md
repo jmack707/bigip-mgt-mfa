@@ -227,6 +227,38 @@ iRule makes the real last hop to `BIGIP_A_TMUI` or `BIGIP_B_TMUI`. The build als
 sys `db` keys, without which the iRule's `node` verb refuses the internal target. Keep the
 defaults unless `192.0.2.0/24` collides with something you route.
 
+### The façade's source address
+The façade virtual's server-side connection **must not have the same source and destination
+address** — TMM will not complete such a connection, and the failure is silent. The build
+guarantees that by pinning the source with a dedicated SNAT pool rather than leaving it to
+`automap`:
+
+| Object | Value |
+|---|---|
+| SNAT pool | `bigip-mgt-mfa-facade-snat` |
+| Member | `MFA_FACADE_SNAT_ADDR`, default host `.240` on `BIGIP_A_TMUI`'s subnet |
+| Applies to | every façade virtual, on **standalone and HA alike** |
+
+This is one configuration for both shapes — no branching on unit count. `automap` only ever
+worked on a pair by accident, because a floating self IP exists there and automap prefers it;
+on a standalone unit, or the standby half of a pair, the only address on that VLAN *is* the
+`node` target.
+
+The address never leaves the appliance (the hop is TMM to its own self IP), so it needs no
+route and nothing in the fabric sees it — which is what makes it safe in environments like UDF
+that drop traffic from addresses they have not assigned. It must simply not collide with a
+real host on that subnet.
+
+`bigip/apm-build.sh` PATCHes both the pool member and each virtual's translation on every run
+rather than relying on the creates, which tolerate `409` — so an existing deployment converges
+instead of keeping a translation that cannot work.
+
+Getting this wrong is not a visible error: the tile completes its TLS handshake with the façade
+and then resets after ten seconds, while every object involved reads as correct. See
+[A webtop tile resets instead of opening TMUI](../operations/troubleshooting.md#a-webtop-tile-resets-instead-of-opening-tmui),
+and [ADR 0007](../adr/0007-facade-source-address.md) for the measurements behind the two
+rejected alternatives (`none`, and adding a self IP).
+
 `MFA_APM_TRAFFIC_GROUP` is declared in `.env.example` and exported with the rest of the file,
 but no script in the repo currently reads it. `bigip/apm-build.sh` creates the webtop virtual
 server without an explicit traffic group, so the VIP inherits the device default. Treat the
@@ -277,6 +309,7 @@ one is written with a `${VAR:-default}` fallback.
 | `MFA_REGEN_CA` | `0` | Set to `1` to mint a **new** demo CA instead of reusing the existing one. Invalidates every browser trust import and both BIG-IP anchors |
 | `MFA_CA_CN` | `bigip-mgt-mfa Demo CA` | Subject CN of the generated CA |
 | `MFA_LDAP_CA_NAME` | bundled `bigip-mgt-mfa-ca.crt`, external `bigip-mgt-mfa-dir-ca.crt` | Object name the directory CA is installed under on each BIG-IP |
+| `MFA_FACADE_SNAT_ADDR` | host `.240` on `BIGIP_A_TMUI`'s subnet | Source address the façade's server-side connection is pinned to. Must not be the `node` target or a real host; never leaves the appliance, so it needs no route ([ADR 0007](../adr/0007-facade-source-address.md)) |
 
 why they are derived from `MFA_LDAP_SCHEMA` rather than left to be set by hand.
 

@@ -202,6 +202,14 @@ Each unit's reachability is re-probed before its own checks, so a unit whose `re
 wedges mid-run is reported as `SKIP` with the reason rather than as failed configuration, and
 a wedged unit no longer suppresses a healthy peer's results.
 
+One check drives the data path instead of reading configuration: each façade is asked to fetch
+TMUI's login page from the appliance itself, so a tile whose last hop is unreachable fails
+here rather than at click time. Objects existing is not the same claim — the portal resource,
+its SSO, the façade virtual and its `node` iRule can all be correct while the hop is dead
+([ADR 0007](../adr/0007-facade-source-address.md)). Both façades live on unit A, so this costs
+one `/util/bash` call for the whole deployment. Run it against a **standby** unit and expect a
+false failure: floating addresses are inactive there, which is the same condition it detects.
+
 The role check is asserted from each BIG-IP's own `/var/log/secure` audit line rather than
 from an HTTP status code. F5's Guest role is denied iControl REST outright, so a correctly
 read-only user answers `401` to `curl` — a status-code test would read the demo working as

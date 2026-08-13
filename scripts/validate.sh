@@ -188,6 +188,32 @@ else
   done
   VS=$(curl "${A[@]}" -m8 "https://${BIGIP_A_MGMT}/mgmt/tm/ltm/virtual/~Common~bigip-mgt-mfa-vs" | jq -r '.destination // empty')
   [ -n "$VS" ] && ok "webtop virtual server $VS" || bad "webtop virtual server missing"
+
+  # DRIVE the façade instead of trusting that its objects exist. Every check above passed on a
+  # deployment whose tile could not open at all: the portal resource, its SSO, the façade
+  # virtual and the node iRule were each perfect, and the last hop was still unreachable
+  # because the SNAT source equalled the node target. Configuration checks cannot see that;
+  # one request through the façade can. Asking the appliance to fetch TMUI's login page
+  # through its own façade exercises the whole hop with no webtop, session or browser
+  # involved. Both façades live on unit A, so this is ONE /util/bash call for the pair.
+  FAC_IPS=("${MFA_SHADOW_A:-192.0.2.5}"); mfa_have_peer && FAC_IPS+=("${MFA_SHADOW_B:-192.0.2.6}")
+  FAC_CMD=""
+  for f in "${FAC_IPS[@]}"; do
+    FAC_CMD="${FAC_CMD}curl -sk -o /dev/null --max-time 8 -w '${f}=%{http_code} ' https://${f}/tmui/login.jsp 2>/dev/null || echo -n '${f}=000 '; "
+  done
+  FAC_OUT=$(curl "${A[@]}" -m30 -X POST -H 'Content-Type: application/json' \
+    "https://${BIGIP_A_MGMT}/mgmt/tm/util/bash" \
+    -d "$(jq -n --arg u "-c \"$FAC_CMD\"" '{command:"run",utilCmdArgs:$u}')" | jq -r '.commandResult // ""')
+  for f in "${FAC_IPS[@]}"; do
+    # Pull out just this façade's code. A naive ${VAR#*=} drags in every later result and
+    # reports "got 000 192.0.2.5=000 192.0.2.6=200", which reads as three separate numbers.
+    CODE=$(printf '%s' "$FAC_OUT" | tr ' ' '\n' | sed -n "s/^${f}=//p" | tail -1)
+    case "$CODE" in
+      200|302) ok "façade ${f} reaches TMUI (the tile's last hop)" ;;
+      "")      skip "façade ${f} — could not run the probe on ${BIGIP_A_MGMT}" ;;
+      *)       bad "façade ${f} did NOT reach TMUI (HTTP ${CODE}) — the tile will reset; check the node target and the façade's SNAT source" ;;
+    esac
+  done
   fi   # end of the unit-A-specific block
 fi
 

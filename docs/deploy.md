@@ -42,6 +42,13 @@ rebuilds the tile list without it.
   stored in `.env`; an exported value wins.
 - LTM and APM provisioned and licensed on each unit.
 - The BIG-IP can reach `MFA_HOST_IP` on the directory ports.
+- **Know whether your environment lets you add addresses to a unit.** UDF and most cloud
+  fabrics drop traffic sourced from an address they have not assigned to the interface, so a
+  self IP added inside the guest is not usable as a source. Nothing here requires one — the
+  build derives the façade's source translation from the deployment shape instead
+  ([ADR 0007](adr/0007-facade-source-address.md)) — but it rules out "add a floating self IP"
+  as a fix if you go looking for one, and adding one moves TMM's egress source for all
+  self-originated traffic, which breaks the LDAP bind.
 - At least one user enrolled (`scripts/enroll-totp.sh`), or nobody can log in — an absent
   seed is treated as a denial, never as a skipped factor.
 
