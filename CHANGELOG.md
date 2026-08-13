@@ -6,7 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **`.env.example` is organised by the two choices that decide what you fill in**, rather
+  than by topic. Seven numbered sections — this host + DNS, the directory keys live in *both*
+  modes, bundled-only, external-only, the BIG-IP, the second factor, and the defaulted
+  overrides — each stating when it applies, so a reader in one directory mode can skip the
+  other outright. Every BIG-IP concern is now in one section: unit A, the optional unit B,
+  the APM data plane, and `MFA_DEVICE_GROUP`, which previously sat alone under "HA".
+  A key with a working default now ships **commented out, showing that default**, so a fresh
+  copy contains only the lines you must decide on. No key was added, removed or renamed, and
+  the values every script derives are unchanged in both modes.
+- The directory-connection keys are no longer presented as external-only. `MFA_LDAP_PORT`,
+  `MFA_LDAPS_PORT`, `MFA_BIND_DN`, `MFA_USER_SEARCH_BASE` and `MFA_LOGIN_ATTR` are read in
+  **both** modes — APM builds its AAA pool on the first and system auth uses the second, even
+  against the bundled directory — so they now sit in the both-modes section, which says so.
+  `docs/reference/configuration.md` follows `.env.example` section for section.
+
 ### Fixed
+- **Ten truncated sentences in `docs/reference/configuration.md`**, each missing its start or
+  middle, which had left the Overview, the directory model, the DNS rationale, the admin-group
+  mechanism and the `MFA_WEBTOP_FQDN` note unreadable. Each is reconstructed from the code it
+  describes rather than from inference: the remote-role paragraph against
+  `bigip/system-auth.sh` (and now listing all three rules with their `lineOrder` and console),
+  the DNS zone against `dns/Corefile.tmpl`, and the three `MFA_WEBTOP_FQDN` consumers against
+  `scripts/gen-certs.sh`, `dns/Corefile.tmpl` and the two test scripts. A paragraph that had
+  been spliced between two rows of the BIG-IP object-names table, breaking it, moves below;
+  the table regains the webtop, SSO, remote-role and TOTP data-group rows.
+- The stale "Demo principals" section, which still described **two** seeded users, is merged
+  into "Demo principals and roles" — the current four principals and three roles. The
+  reference to `scripts/demo-login.sh`, a script that does not exist in this repository, is
+  removed. "Derived and undocumented overrides" claimed none of its keys appear in
+  `.env.example`; three of the five do, and the section now says which.
 - `scripts/validate.sh` and `scripts/test-mfa-matrix.sh` can run back to back again. The SSO
   probe performs a real login, and with codes now single-use that spent `alice.admin`'s code
   for the whole time step — the matrix, run next, reported its own GRANT case as
